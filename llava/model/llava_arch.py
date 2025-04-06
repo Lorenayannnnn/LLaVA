@@ -15,6 +15,7 @@
 
 from abc import ABC, abstractmethod
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -137,24 +138,61 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images)
-        image_features = self.get_model().mm_projector(image_features)
-        return image_features
+    # modify
+    def encode_images(self, images, shuffle_trivial_vision_tokens_keep_percentage=None):
+        # image_features = self.get_model().get_vision_tower()(images)
+        # image_features = self.get_model().mm_projector(image_features)
+        # return image_features
+
+        # Reference https://github.com/Theia-4869/FasterVLM
+        image_features, image_attentions = self.get_model().get_vision_tower()(images)  # (B, N, C), (B, M, N) = (1, 576, 1024), (1, 16, 576)
+
+        if shuffle_trivial_vision_tokens_keep_percentage is not None:
+            # image_attentions = image_attentions.max(dim=1)[0] # (B, N) = (1, 576)
+            # Avg across attn heads
+            image_attentions = image_attentions.mean(dim=1)  # (B, N) = (1, 576)
+
+            B, N = image_features.shape[:2]
+            visual_token_num_to_keep = int(N * shuffle_trivial_vision_tokens_keep_percentage)
+
+            # Keep visual tokens by random scores
+            # token_weights = torch.rand(B, N, device=image_features.device) # (B, N)
+            # token_indices = torch.topk(token_weights, k=visual_token_num, dim=1)[1] # (B, T)
+            # token_indices = torch.sort(token_indices, dim=1)[0] # (B, T)
+
+            # Keep visual tokens by attention scores
+            token_indices = torch.topk(image_attentions, k=visual_token_num_to_keep, dim=1)[1]  # (B, T)
+            token_indices = torch.sort(token_indices, dim=1)[0]  # (B, T)
+
+            # Create important token index mask
+            important_mask = torch.zeros(B, N, dtype=torch.bool, device=image_features.device)  # (B, N)
+            important_mask.scatter_(1, token_indices, True)  # (B, N)
+
+            # Get unimportant token indices and shuffle them
+            unimportant_mask = ~important_mask
+            all_indices = torch.arange(N, device=image_features.device).unsqueeze(0).expand(B, -1)  # All image token indices: (B, N)
+            unimportant_indices= all_indices[unimportant_mask].view(B, N - visual_token_num_to_keep)  # (B, N-K)
+            rand_perm_unimportant_indices = torch.stack([unimportant_indices[b, torch.randperm(unimportant_indices.size(1))] for b in range(B)])  # (B, N-K)
+            batch_indices = torch.arange(B, device=image_features.device).unsqueeze(1).expand(B, N - visual_token_num_to_keep)
+            image_features[batch_indices, unimportant_indices] = image_features[batch_indices, rand_perm_unimportant_indices]
+
+        image_features = self.get_model().mm_projector(image_features)  # (B, N, D)
+
+        return image_features, image_attentions
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
-        images, image_sizes=None
+        images, image_sizes=None, all_image_token_indices=None, shuffle_trivial_vision_tokens_keep_percentage=None, image_attentions=None
     ):
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
-            return input_ids, position_ids, attention_mask, past_key_values, None, labels
+            return input_ids, position_ids, attention_mask, past_key_values, None, labels, all_image_token_indices, image_attentions
 
         if type(images) is list or images.ndim == 5:
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
             concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images)
+            image_features, image_attentions = self.encode_images(concat_images, shuffle_trivial_vision_tokens_keep_percentage)
             split_sizes = [image.shape[0] for image in images]
             image_features = torch.split(image_features, split_sizes, dim=0)
             mm_patch_merge_type = getattr(self.config, 'mm_patch_merge_type', 'flat')
@@ -199,7 +237,7 @@ class LlavaMetaForCausalLM(ABC):
             else:
                 raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         else:
-            image_features = self.encode_images(images)
+            image_features, image_attentions = self.encode_images(images, shuffle_trivial_vision_tokens_keep_percentage)
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
@@ -229,6 +267,10 @@ class LlavaMetaForCausalLM(ABC):
         new_input_embeds = []
         new_labels = []
         cur_image_idx = 0
+
+        # modify
+        new_vision_token_idx = []
+
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
             if num_images == 0:
@@ -252,15 +294,22 @@ class LlavaMetaForCausalLM(ABC):
             cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
             cur_new_input_embeds = []
             cur_new_labels = []
-
+            #modify
+            cur_vision_token_idx = []
             for i in range(num_images + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
                 if i < num_images:
+                    # modify
+                    before_add_image_len = len(cur_new_input_embeds)
+
                     cur_image_features = image_features[cur_image_idx]
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+
+                    # modify
+                    cur_vision_token_idx.extend(range(before_add_image_len, len(cur_new_input_embeds[-1])))
 
             cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
 
@@ -269,6 +318,9 @@ class LlavaMetaForCausalLM(ABC):
 
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
+
+            # modify
+            new_vision_token_idx.append(cur_vision_token_idx)
 
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
@@ -296,6 +348,9 @@ class LlavaMetaForCausalLM(ABC):
                     new_labels_padded[i, -cur_len:] = cur_new_labels
                     attention_mask[i, -cur_len:] = True
                     position_ids[i, -cur_len:] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
+
+                    # modify
+                    new_vision_token_idx[i] = (np.array(new_vision_token_idx[i]) + (max_len - cur_len)).tolist()
             else:
                 new_input_embeds_padded.append(torch.cat((
                     cur_new_embed,
@@ -321,7 +376,7 @@ class LlavaMetaForCausalLM(ABC):
         if _position_ids is None:
             position_ids = None
 
-        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
+        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, torch.tensor(new_vision_token_idx), image_attentions
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:

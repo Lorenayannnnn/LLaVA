@@ -1,4 +1,6 @@
 import argparse
+
+import numpy as np
 import torch
 import os
 import json
@@ -12,7 +14,8 @@ from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, process_images, load_image_from_base64, get_model_name_from_path
 
-from PIL import Image
+from llava.eval.utils import visualize_token_to_vis_token_attn_scores
+
 import math
 
 
@@ -56,7 +59,7 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, args.vision_token_attn, args.attn_implementation)
 
     questions = pd.read_table(os.path.expanduser(args.question_file))
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
@@ -68,11 +71,17 @@ def eval_model(args):
         args.conv_mode = args.conv_mode + '_mmtag'
         print(f'It seems that this is a plain model, but it is not using a mmtag prompt, auto switching to {args.conv_mode}.')
 
-    for index, row in tqdm(questions.iterrows(), total=len(questions)):
+    is_correct = 0
+    total_cnt = 0
+    all_last_token_to_all_image_token_attn_scores = []
+    all_CLS_tok_image_attentions = []
+    progress = tqdm(questions.iterrows(), total=len(questions))
+    for index, row in progress:
         options = get_options(row, all_options)
         cur_option_char = all_options[:len(options)]
 
         if args.all_rounds:
+            raise NotImplementedError("All rounds not supported yet")
             num_rounds = len(options)
         else:
             num_rounds = 1
@@ -81,6 +90,7 @@ def eval_model(args):
             idx = row['index']
             question = row['question']
             hint = row['hint']
+            answer = row['answer']
             image = load_image_from_base64(row['image'])
             if not is_none(hint):
                 question = hint + '\n' + question
@@ -120,6 +130,16 @@ def eval_model(args):
                     max_new_tokens=1024,
                     use_cache=True)
 
+                outputs_for_attn_analysis = model(input_ids, images=image_tensor.unsqueeze(0).half().cuda(), output_attentions=True)
+
+            batch_size = input_ids.size(0)
+            assert batch_size == 1
+            last_token_attn_scores = outputs_for_attn_analysis.attentions[-1][0, :, -1, :]
+            avg_last_token_attn_scores = torch.mean(last_token_attn_scores, dim=0)
+            all_image_token_indices = outputs_for_attn_analysis.all_image_token_indices[0]
+            last_token_to_all_image_token_attn_scores = avg_last_token_attn_scores[all_image_token_indices].cpu().tolist()
+            CLS_tok_image_attentions = outputs_for_attn_analysis.image_attentions[0].mean(0).cpu().tolist()
+
             outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
 
             ans_id = shortuuid.uuid()
@@ -131,13 +151,45 @@ def eval_model(args):
                                     "option_char": cur_option_char,
                                     "answer_id": ans_id,
                                     "model_id": model_name,
-                                    "metadata": {}}) + "\n")
+                                    "metadata": {},
+                                    "gt_answer": answer,
+                                    "last_token_to_vis_token_attn_scores": last_token_to_all_image_token_attn_scores,
+                                   "image_attentions": CLS_tok_image_attentions
+                                       }) + "\n")
             ans_file.flush()
+
+            all_last_token_to_all_image_token_attn_scores.append(last_token_to_all_image_token_attn_scores)
+            all_CLS_tok_image_attentions.append(CLS_tok_image_attentions)
+
+            if outputs.startswith(answer):
+                is_correct += 1
+            else:
+                pass
+                # print(f"Output: {outputs}")
+                # print(f"Answer: {answer}")
+                # import pdb
+                # pdb.set_trace()
+            total_cnt += 1
+            progress.set_description(f"Acc: {is_correct / total_cnt * 100:.1f}%")
 
             # rotate options
             options = options[1:] + options[:1]
             cur_option_char = cur_option_char[1:] + cur_option_char[:1]
     ans_file.close()
+
+    # Output accuracy
+    acc_str = f"Accuracy: {is_correct / total_cnt * 100:.1f}% ({is_correct}/{total_cnt})"
+    print(acc_str)
+    output_dir = os.path.dirname(args.answers_file)
+    with open(os.path.join(output_dir, "accuracy.txt"), "w") as f:
+        f.write(acc_str + "\n")
+
+    # Visualize avg all_last_token_to_all_image_token_attn_scores and all_CLS_tok_image_attentions
+    avg_last_token_to_all_image_token_attn_scores = np.average(np.array(all_last_token_to_all_image_token_attn_scores), axis=0)
+    visualize_token_to_vis_token_attn_scores(avg_last_token_to_all_image_token_attn_scores, "Last Text To Image Token Attn Score", os.path.join(output_dir, "last_txt_to_image_attn_score.png"))
+    avg_CLS_tok_image_attentions = np.average(np.array(all_CLS_tok_image_attentions), axis=0)
+    visualize_token_to_vis_token_attn_scores(avg_CLS_tok_image_attentions, "CLS To Image Token Attn Score", os.path.join(output_dir, "CLS_image_attn_score.png"))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -155,6 +207,10 @@ if __name__ == "__main__":
     parser.add_argument("--all-rounds", action="store_true")
     parser.add_argument("--single-pred-prompt", action="store_true")
     parser.add_argument("--lang", type=str, default="en")
+
+    parser.add_argument("--attn_implementation", type=str, default="eager")
+    parser.add_argument("--vision_token_attn", type=str, default="causal", choices=["causal", "full"])
+
     args = parser.parse_args()
 
     eval_model(args)

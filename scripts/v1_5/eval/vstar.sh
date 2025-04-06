@@ -1,8 +1,5 @@
 #!/bin/bash
 
-SPLIT="mmbench_dev_20230712"
-#MODEL_PATH=/home/tianyi/LLaVA/outputs/checkpoints/train_10000_mcq/keep_-vision_causal-llava-v1.5-7b-finetune
-#MODEL_PATH=/home/tianyi/LLaVA/outputs/checkpoints/train_10000_mcq/keep_-vision_full-llava-v1.5-7b-finetune
 #MODEL_PATH=/home/tianyi/LLaVA/outputs/checkpoints/train_10000_mcq/keep_0.25-vision_causal-llava-v1.5-7b-finetune
 #MODEL_PATH=/home/tianyi/LLaVA/outputs/checkpoints/train_10000_mcq/keep_0.5-vision_causal-llava-v1.5-7b-finetune
 #MODEL_PATH=/home/tianyi/LLaVA/outputs/checkpoints/train_10000_mcq/keep_0.1-vision_causal-llava-v1.5-7b-finetune
@@ -14,17 +11,18 @@ MODEL_PATH=/home/tianyi/LLaVA/outputs/checkpoints/train_10000_mix/keep_0.25-visi
 
 echo "Evaluate ${MODEL_PATH}"
 
-CUDA_VISIBLE_DEVICES=7 python -m llava.eval.model_vqa_mmbench \
+CUDA_VISIBLE_DEVICES=5 python -m llava.eval.model_vqa_vstar \
     --model-path $MODEL_PATH \
-    --question-file ./playground/data/eval/mmbench/$SPLIT.tsv \
-    --answers-file $MODEL_PATH/mmbench/preds.jsonl \
+    --question-file ./playground/data/vstar_bench/test_questions.jsonl \
+    --image-folder ./playground/data/vstar_bench\
+    --output_dir $MODEL_PATH/vstar_bench \
     --single-pred-prompt \
     --temperature 0 \
     --conv-mode vicuna_v1 \
     --vision_token_attn full
 #    TODO change vision_token_attn
-
 #    --answers-file outputs/test/test.jsonl \
+
 #mkdir -p playground/data/eval/mmbench/answers_upload/$SPLIT
 #
 #python scripts/convert_mmbench_for_submission.py \
@@ -33,4 +31,4 @@ CUDA_VISIBLE_DEVICES=7 python -m llava.eval.model_vqa_mmbench \
 #    --upload-dir ./playground/data/eval/mmbench/answers_upload/$SPLIT \
 #    --experiment llava-v1.5-13b
 
-#bash scripts/v1_5/eval/mmbench.sh
+#bash scripts/v1_5/eval/vstar.sh

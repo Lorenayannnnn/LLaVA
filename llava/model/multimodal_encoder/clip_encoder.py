@@ -32,29 +32,41 @@ class CLIPVisionTower(nn.Module):
 
         self.is_loaded = True
 
+    # modify
+    # Reference https://github.com/Theia-4869/FasterVLM
     def feature_select(self, image_forward_outs):
         image_features = image_forward_outs.hidden_states[self.select_layer]
+        image_attentions = image_forward_outs.attentions[self.select_layer]
         if self.select_feature == 'patch':
             image_features = image_features[:, 1:]
+            image_attentions = image_attentions[:, :, 0, 1:]    # CLS token attention
         elif self.select_feature == 'cls_patch':
+            raise NotImplementedError("cls_patch feature_select not supported yet")
             image_features = image_features
+            image_attentions = image_attentions
         else:
             raise ValueError(f'Unexpected select feature: {self.select_feature}')
-        return image_features
+        return image_features, image_attentions
 
+    # modify
+    # Reference https://github.com/Theia-4869/FasterVLM
     @torch.no_grad()
     def forward(self, images):
         if type(images) is list:
-            image_features = []
+            image_features, image_attentions = [], []
             for image in images:
-                image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
-                image_feature = self.feature_select(image_forward_out).to(image.dtype)
-                image_features.append(image_feature)
+                image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0),
+                                                      output_attentions=True, output_hidden_states=True)
+                image_feature, image_attention = self.feature_select(image_forward_out)
+                image_features.append(image_feature.to(image.dtype))
+                image_attentions.append(image_attention.to(image.dtype))
         else:
-            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
-            image_features = self.feature_select(image_forward_outs).to(images.dtype)
+            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype),
+                                                   output_attentions=True, output_hidden_states=True)
+            image_features, image_attentions = self.feature_select(image_forward_outs)
+            image_features, image_attentions = image_features.to(images.dtype), image_attentions.to(images.dtype)
 
-        return image_features
+        return image_features, image_attentions
 
     @property
     def dummy_feature(self):

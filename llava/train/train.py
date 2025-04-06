@@ -65,6 +65,10 @@ class ModelArguments:
     mm_patch_merge_type: Optional[str] = field(default='flat')
     mm_vision_select_feature: Optional[str] = field(default="patch")
 
+    # Modify
+    vision_token_attn: Optional[str] = field(default="causal")      # causal, full
+    shuffle_trivial_vision_tokens_keep_percentage: Optional[float] = field(default=None)     # top X% of vision tokens will be maintained
+
 
 @dataclass
 class DataArguments:
@@ -74,6 +78,9 @@ class DataArguments:
     is_multimodal: bool = False
     image_folder: Optional[str] = field(default=None)
     image_aspect_ratio: str = 'square'
+
+    # modify
+    max_train_samples: Optional[int] = field(default=None)
 
 
 @dataclass
@@ -664,6 +671,10 @@ class LazySupervisedDataset(Dataset):
         super(LazySupervisedDataset, self).__init__()
         list_data_dict = json.load(open(data_path, "r"))
 
+        # modify
+        if data_args.max_train_samples is not None:
+            list_data_dict = list_data_dict[:data_args.max_train_samples]
+
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
@@ -794,6 +805,10 @@ def train(attn_implementation=None):
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
+    # resume_from_checkpoint = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")) is not None
+    resume_from_checkpoint = "checkpoints" in model_args.model_name_or_path
+    print(f"resume_from_checkpoint: {resume_from_checkpoint}")
+
     bnb_model_from_pretrained_args = {}
     if training_args.bits in [4, 8]:
         from transformers import BitsAndBytesConfig
@@ -815,6 +830,7 @@ def train(attn_implementation=None):
 
     if model_args.vision_tower is not None:
         if 'mpt' in model_args.model_name_or_path:
+            raise NotImplementedError
             config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
             config.attn_config['attn_impl'] = training_args.mpt_attn_impl
             model = LlavaMptForCausalLM.from_pretrained(
@@ -829,9 +845,14 @@ def train(attn_implementation=None):
                 cache_dir=training_args.cache_dir,
                 attn_implementation=attn_implementation,
                 torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
+
+                # modify
+                vision_token_attn=model_args.vision_token_attn,
+                shuffle_trivial_vision_tokens_keep_percentage=model_args.shuffle_trivial_vision_tokens_keep_percentage,
                 **bnb_model_from_pretrained_args
             )
     else:
+        raise NotImplementedError
         model = transformers.LlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -840,6 +861,12 @@ def train(attn_implementation=None):
             **bnb_model_from_pretrained_args
         )
     model.config.use_cache = False
+
+    # modify: issue caused by higher version of transformers
+    # Set to greedy
+    model.generation_config.do_sample = False
+    model.generation_config.temperature = 1.0
+    model.generation_config.top_p = 1.0
 
     if model_args.freeze_backbone:
         model.model.requires_grad_(False)
@@ -907,12 +934,12 @@ def train(attn_implementation=None):
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
-    if model_args.vision_tower is not None:
+    if not resume_from_checkpoint and model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(
             model_args=model_args,
             fsdp=training_args.fsdp
         )
-        
+
         vision_tower = model.get_vision_tower()
         vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
@@ -963,7 +990,8 @@ def train(attn_implementation=None):
                     args=training_args,
                     **data_module)
 
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+    if resume_from_checkpoint:
+        print("Resume from checkpoint")
         trainer.train(resume_from_checkpoint=True)
     else:
         trainer.train()

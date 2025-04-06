@@ -61,12 +61,24 @@ def eval_pope(answers, label_file):
     print('Yes ratio: {}'.format(yes_ratio))
     print('%.3f, %.3f, %.3f, %.3f, %.3f' % (f1, acc, precision, recall, yes_ratio) )
 
+    with open(output_fn, "a") as f:
+        f.write('TP\tFP\tTN\tFN\t' + "\n")
+        f.write('{}\t{}\t{}\t{}'.format(TP, FP, TN, FN) + "\n")
+        f.write('Accuracy: {}'.format(acc) + "\n")
+        f.write('Precision: {}'.format(precision) + "\n")
+        f.write('Recall: {}'.format(recall) + "\n")
+        f.write('F1 score: {}'.format(f1) + "\n")
+        f.write('Yes ratio: {}'.format(yes_ratio) + "\n")
+        f.write('%.3f, %.3f, %.3f, %.3f, %.3f' % (f1, acc, precision, recall, yes_ratio) + "\n")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--annotation-dir", type=str)
     parser.add_argument("--question-file", type=str)
     parser.add_argument("--result-file", type=str)
     args = parser.parse_args()
+
+    output_fn = os.path.join(os.path.dirname(args.result_file), "eval_results.txt")
 
     questions = [json.loads(line) for line in open(args.question_file)]
     questions = {question['question_id']: question for question in questions}
@@ -79,3 +91,6 @@ if __name__ == "__main__":
         print('Category: {}, # samples: {}'.format(category, len(cur_answers)))
         eval_pope(cur_answers, os.path.join(args.annotation_dir, file))
         print("====================================")
+        with open(output_fn, "a") as f:
+            f.write('Category: {}, # samples: {}'.format(category, len(cur_answers)) + "\n")
+            f.write("====================================" + "\n")
