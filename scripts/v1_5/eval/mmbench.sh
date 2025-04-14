@@ -21,7 +21,7 @@ CUDA_VISIBLE_DEVICES=7 python -m llava.eval.model_vqa_mmbench \
     --single-pred-prompt \
     --temperature 0 \
     --conv-mode vicuna_v1 \
-    --vision_token_attn full
+#    --vision_token_attn full
 #    TODO change vision_token_attn
 
 #    --answers-file outputs/test/test.jsonl \

@@ -178,7 +178,7 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, args.vision_token_attn, args.attn_implementation)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, args.attn_implementation)
 
     questions = pd.read_table(os.path.expanduser(args.question_file))
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
@@ -284,6 +284,8 @@ def eval_model(args):
             # else:
             option_chosen, last_token_to_all_image_token_attn_scores, CLS_tok_image_attentions = multiple_choices_inference(model, tokenizer, image_processor, args.conv_mode, image, question, options, do_attn_analysis=True)
 
+            # Note: the first option of all options is always the correct one
+            # which is why we consider it's correct if option_chosen == 0
             correct = 1 if option_chosen == 0 else 0
             per_type_acc[test_type].append(correct)
             all_acc.append(correct)
@@ -298,7 +300,6 @@ def eval_model(args):
             result_single_sample['correct'] = correct
             result_single_sample['last_token_to_all_image_token_attn_scores'] = last_token_to_all_image_token_attn_scores
             result_single_sample['CLS_tok_image_attentions'] = CLS_tok_image_attentions
-
             all_last_token_to_all_image_token_attn_scores.append(last_token_to_all_image_token_attn_scores)
             all_CLS_tok_image_attentions.append(CLS_tok_image_attentions)
 
@@ -343,7 +344,6 @@ if __name__ == "__main__":
     parser.add_argument("--lang", type=str, default="en")
 
     parser.add_argument("--attn_implementation", type=str, default="eager")
-    parser.add_argument("--vision_token_attn", type=str, default="causal", choices=["causal", "full"])
 
     args = parser.parse_args()
 

@@ -68,6 +68,8 @@ class ModelArguments:
     # Modify
     vision_token_attn: Optional[str] = field(default="causal")      # causal, full
     shuffle_trivial_vision_tokens_keep_percentage: Optional[float] = field(default=None)     # top X% of vision tokens will be maintained
+    method_name: Optional[str] = field(default=None)  # CLS, last_text
+    vision_token_pos_enc: Optional[str] = field(default="rope")  # rope, none, constant_for_text
 
 
 @dataclass
@@ -849,6 +851,8 @@ def train(attn_implementation=None):
                 # modify
                 vision_token_attn=model_args.vision_token_attn,
                 shuffle_trivial_vision_tokens_keep_percentage=model_args.shuffle_trivial_vision_tokens_keep_percentage,
+                method_name=model_args.method_name,
+                vision_token_pos_enc=model_args.vision_token_pos_enc,
                 **bnb_model_from_pretrained_args
             )
     else:

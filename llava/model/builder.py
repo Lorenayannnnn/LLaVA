@@ -23,8 +23,8 @@ from llava.model import *
 from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 
-def load_pretrained_model(model_path, model_base, model_name, vision_token_attn, attn_implementation, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
-    kwargs = {"device_map": device_map, "vision_token_attn": vision_token_attn, "attn_implementation": attn_implementation, **kwargs}
+def load_pretrained_model(model_path, model_base, model_name, attn_implementation, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
+    kwargs = {"device_map": device_map, "attn_implementation": attn_implementation, **kwargs}
 
     if device != "cuda":
         kwargs['device_map'] = {"": device}
@@ -164,5 +164,4 @@ def load_pretrained_model(model_path, model_base, model_name, vision_token_attn,
         context_len = model.config.max_sequence_length
     else:
         context_len = 2048
-
     return tokenizer, model, image_processor, context_len

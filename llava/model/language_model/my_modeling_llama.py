@@ -211,7 +211,7 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1, is_image_token_mask=None, vision_token_pos_enc="rope"):
     """Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
@@ -229,13 +229,67 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
             k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
             cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
             the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+
+        # modify
+        is_image_token_mask: batch-size token_indices (If None, used for removing RoPE for vision tokens)
+        vision_token_pos_enc: rope (normal), none, constant_for_text
     Returns:
         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
-    cos = cos[position_ids].unsqueeze(unsqueeze_dim)
-    sin = sin[position_ids].unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+    # modify
+    # is_image_token_mask is not None when .generate (generate future text tokens)
+    if is_image_token_mask is None or vision_token_pos_enc == "rope" or vision_token_pos_enc == "none":
+        cos = cos[position_ids].unsqueeze(unsqueeze_dim)
+        sin = sin[position_ids].unsqueeze(unsqueeze_dim)
+
+        q_embed = (q * cos) + (rotate_half(q) * sin)
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+        if vision_token_pos_enc == "none" and is_image_token_mask is not None:
+            is_image_token_mask = is_image_token_mask.unsqueeze(1).unsqueeze(-1)
+            assert is_image_token_mask is not None, "is_image_token_mask should not be None when vision_token_pos_enc is none"
+            # Remove RoPE for vision tokens
+            q_embed = torch.where(is_image_token_mask, q, q_embed)
+            k_embed = torch.where(is_image_token_mask, k, k_embed)
+    elif vision_token_pos_enc == "constant_vis_key" and is_image_token_mask is not None:
+        q_cos = cos[position_ids].unsqueeze(unsqueeze_dim)
+        q_sin = sin[position_ids].unsqueeze(unsqueeze_dim)
+        q_embed = (q * q_cos) + (rotate_half(q) * q_sin)
+
+        all_k_embed = []
+        for batch_idx in range(is_image_token_mask.size(0)):
+            # Set pos to the last image_token_pos for rotating keys
+            tmp_is_image_token_mask = is_image_token_mask[batch_idx]
+            tmp_position_ids = position_ids[0] if position_ids.size(0) == 1 else position_ids[batch_idx]
+            # TODO: set pos for all image tokens to the last image token pos
+            tmp_position_ids = torch.where(tmp_is_image_token_mask, torch.where(tmp_is_image_token_mask)[0][-1], tmp_position_ids)
+            # unsqueeze for the attn_head dimension
+            k_cos = cos[tmp_position_ids].unsqueeze(0)
+            k_sin = sin[tmp_position_ids].unsqueeze(0)
+            tmp_k_embed = (k[batch_idx] * k_cos) + (rotate_half(k[batch_idx]) * k_sin)
+            all_k_embed.append(tmp_k_embed)
+        k_embed = torch.stack(all_k_embed)
+    elif vision_token_pos_enc == "constant_vis_qk" and is_image_token_mask is not None:
+        all_q_embed = []
+        all_k_embed = []
+        for batch_idx in range(is_image_token_mask.size(0)):
+            # Set pos to the last image_token_pos for rotating keys
+            tmp_is_image_token_mask = is_image_token_mask[batch_idx]
+            tmp_position_ids = position_ids[0] if position_ids.size(0) == 1 else position_ids[batch_idx]
+            # TODO: set pos for all image tokens to the last image token pos
+            tmp_position_ids = torch.where(tmp_is_image_token_mask, torch.where(tmp_is_image_token_mask)[0][-1], tmp_position_ids)
+
+            # unsqueeze for the attn_head dimension
+            tmp_cos = cos[tmp_position_ids].unsqueeze(0)
+            tmp_sin = sin[tmp_position_ids].unsqueeze(0)
+            tmp_q_embed = (q[batch_idx] * tmp_cos) + (rotate_half(q[batch_idx]) * tmp_sin)
+            tmp_k_embed = (k[batch_idx] * tmp_cos) + (rotate_half(k[batch_idx]) * tmp_sin)
+            all_q_embed.append(tmp_q_embed)
+            all_k_embed.append(tmp_k_embed)
+        q_embed = torch.stack(all_q_embed)
+        k_embed = torch.stack(all_k_embed)
+    else:
+        raise ValueError(f"Unknown vision_token_pos_enc {vision_token_pos_enc}")
+
     return q_embed, k_embed
 
 
@@ -287,8 +341,8 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
-
-    def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None):
+    # modify vision_token_pos_enc
+    def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None, vision_token_pos_enc: Optional[str] = "rope", shuffle_trivial_vision_tokens_keep_percentage: float=None, method_name: str=None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -321,6 +375,11 @@ class LlamaAttention(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
         self._init_rope()
 
+        # modify
+        self.vision_token_pos_enc = vision_token_pos_enc
+        self.shuffle_trivial_vision_tokens_keep_percentage = shuffle_trivial_vision_tokens_keep_percentage
+        self.method_name = method_name
+
     def _init_rope(self):
         if self.config.rope_scaling is None:
             self.rotary_emb = LlamaRotaryEmbedding(
@@ -329,6 +388,8 @@ class LlamaAttention(nn.Module):
                 base=self.rope_theta,
             )
         else:
+            # modify
+            raise NotImplementedError
             scaling_type = self.config.rope_scaling["type"]
             scaling_factor = self.config.rope_scaling["factor"]
             if scaling_type == "linear":
@@ -348,9 +409,6 @@ class LlamaAttention(nn.Module):
             else:
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -359,6 +417,10 @@ class LlamaAttention(nn.Module):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+
+        # modify
+        all_image_token_indices: Optional[list] = None,
+        is_image_token_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if "padding_mask" in kwargs:
@@ -404,7 +466,10 @@ class LlamaAttention(nn.Module):
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        # q, k, cos, sin, position_ids, unsqueeze_dim=1, is_image_token_mask=None, vision_token_pos_enc="rope
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids,
+                                                        is_image_token_mask=is_image_token_mask if self.vision_token_pos_enc != "rope" else None,
+                                                        vision_token_pos_enc=self.vision_token_pos_enc)
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
@@ -431,6 +496,41 @@ class LlamaAttention(nn.Module):
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+
+
+        if self.method_name is not None and "dropout_by_last_text_attn" in self.method_name and self.shuffle_trivial_vision_tokens_keep_percentage is not None:
+            # is_image_token_mask shape: (bsz, N)
+            # TODO double check
+            import pdb
+            pdb.set_trace()
+            # Get last text to image tokens attention weight
+            B, head_num, N = attn_weights.size(0), attn_weights.size(1), attn_weights.size(-1)
+            last_text_to_others_attn_weight = attn_weights[:, :, -1, :].sum(dim=1)      # bsz, num_heads, N
+            last_text_to_image_tokens_attn_weight = torch.where(is_image_token_mask, last_text_to_others_attn_weight, 0)
+
+            # Get important image tokens' indices by last text token's attention (for each head)
+            keep_image_tok_num = int(sum(is_image_token_mask[0]) * self.shuffle_trivial_vision_tokens_keep_percentage)
+            important_image_token_indices = torch.topk(last_text_to_image_tokens_attn_weight, k=keep_image_tok_num, dim=-1)[1]  # bsz, num_heads, keep_image_tok_num
+            # Create important token index mask (important image tokens and text tokens that the model can still attend to)
+            important_mask = torch.zeros(B, head_num, N, dtype=torch.bool, device=attn_weights.device)  # (B, num_heads, N)
+            important_mask.scatter_(1, important_image_token_indices, True)
+            # Set all text tokens to important as well
+            text_mask = (~is_image_token_mask).expand(B, head_num, N)
+            important_mask = torch.where(text_mask, True, important_mask)       # (B, num_heads, N)
+            # Expand to B, num_head, q_len, N
+            important_mask = important_mask.expand(B, head_num, q_len, N)  # (B, num_heads, q_len, N)
+            if self.method_name == "dropout_by_last_text_attn_for_txt":
+                # Set image query token position in mask to True (only masking out image tokens for text tokens, excluding image tokens themselves)
+                for batch_idx in range(B):
+                    # Set image query token position to True
+                    important_mask[batch_idx, :, all_image_token_indices[batch_idx], all_image_token_indices[batch_idx]] = True
+
+            unimportant_mask = ~important_mask
+            # (Set text-to-unimportant image tokens' attention score to 0)
+            # Set attention to unimportant image tokens to 0
+            attn_weights = torch.where(unimportant_mask, attn_weights, 0)
+
+
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -453,7 +553,17 @@ class LlamaAttention(nn.Module):
         if not output_attentions:
             attn_weights = None
 
+        # modify
+        if self.shuffle_trivial_vision_tokens_keep_percentage is not None:
+            if self.method_name == "last_text":
+                pass
+            else:
+                pass
+
         return attn_output, attn_weights, past_key_value
+
+    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
 
 class LlamaFlashAttention2(LlamaAttention):
@@ -754,11 +864,15 @@ LLAMA_ATTENTION_CLASSES = {
 
 
 class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig, layer_idx: int):
+    # modify
+    def __init__(self, config: LlamaConfig, layer_idx: int, vision_token_pos_enc: str, shuffle_trivial_vision_tokens_keep_percentage: float, method_name: str):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
+        self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx,
+                                                                              vision_token_pos_enc=vision_token_pos_enc,
+                                                                              shuffle_trivial_vision_tokens_keep_percentage=shuffle_trivial_vision_tokens_keep_percentage,
+                                                                              method_name=method_name,)
 
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -772,6 +886,10 @@ class LlamaDecoderLayer(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+
+        # modify
+        all_image_token_indices: Optional[list] = None,
+        is_image_token_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -805,6 +923,10 @@ class LlamaDecoderLayer(nn.Module):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+
+            # modify
+            all_image_token_indices=all_image_token_indices,
+            is_image_token_mask=is_image_token_mask,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -957,8 +1079,9 @@ class LlamaModel(LlamaPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        # modify
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [LlamaDecoderLayer(config, layer_idx, config.vision_token_pos_enc, config.shuffle_trivial_vision_tokens_keep_percentage, config.method_name) for layer_idx in range(config.num_hidden_layers)]
         )
         self._use_sdpa = config._attn_implementation == "sdpa"
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
@@ -967,6 +1090,10 @@ class LlamaModel(LlamaPreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+
+        # modify
+        self.shuffle_trivial_vision_tokens_keep_percentage = config.shuffle_trivial_vision_tokens_keep_percentage
+        self.method_name = config.method_name
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -989,6 +1116,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
         # modify
         all_image_token_indices: Optional[list] = None,
+        is_image_token_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1052,7 +1180,7 @@ class LlamaModel(LlamaPreTrainedModel):
             # 4d mask is passed through the layers
             # modify
             attention_mask = _prepare_4d_causal_attention_mask(
-                attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length, all_image_token_indices=all_image_token_indices
+                attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length, vision_token_attn=self.config.vision_token_attn, all_image_token_indices=all_image_token_indices
             )
 
         # embed positions
@@ -1075,6 +1203,10 @@ class LlamaModel(LlamaPreTrainedModel):
                     past_key_values,
                     output_attentions,
                     use_cache,
+
+                    # modify
+                    all_image_token_indices,
+                    is_image_token_mask,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -1084,6 +1216,10 @@ class LlamaModel(LlamaPreTrainedModel):
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
+
+                    # modify
+                    all_image_token_indices=all_image_token_indices,
+                    is_image_token_mask=is_image_token_mask,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1165,6 +1301,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
         # modify
         all_image_token_indices: Optional[torch.LongTensor] = None,
+        is_image_token_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1197,10 +1334,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        # print(attention_mask.shape)
-        # import pdb
-        # pdb.set_trace()
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1214,6 +1347,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
             # modify
             all_image_token_indices=all_image_token_indices,
+            is_image_token_mask=is_image_token_mask,
         )
 
         hidden_states = outputs[0]

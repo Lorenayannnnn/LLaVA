@@ -151,6 +151,10 @@ def load_image_from_base64(image):
 
 def expand2square(pil_img, background_color):
     width, height = pil_img.size
+    # TODO lorena: weird not sure (average mean values for grayscale images)
+    if pil_img.mode == "L" and len(background_color) == 3:
+        # Take average for greyscale images
+        background_color = int(sum(background_color) / len(background_color) * 255)
     if width == height:
         return pil_img
     elif width > height:

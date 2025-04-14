@@ -81,7 +81,7 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, args.vision_token_attn, args.attn_implementation)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, args.attn_implementation)
 
     questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
@@ -141,7 +141,6 @@ if __name__ == "__main__":
     parser.add_argument("--max_new_tokens", type=int, default=128)
 
     parser.add_argument("--attn_implementation", type=str, default="eager")
-    parser.add_argument("--vision_token_attn", type=str, default="causal", choices=["causal", "full"])
     args = parser.parse_args()
 
     eval_model(args)
