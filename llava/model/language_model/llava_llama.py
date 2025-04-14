@@ -24,7 +24,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, \
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.generation.utils import GenerateOutput
 
-from .my_modeling_llama import LlamaForCausalLM, LlamaModel
+from .my_modeling_llama import LlamaForCausalLM, LlamaModel, LlamaForCausalLMOutput
 from ..llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
 
 
@@ -32,6 +32,8 @@ class LlavaConfig(LlamaConfig):
     model_type = "llava_llama"
     vision_token_attn: str = "causal"
     shuffle_trivial_vision_tokens_keep_percentage: float = None
+    method_name: str = None     # shuffle_by_CLS, shuffle_by_last_text, dropout_by_last_text_attn
+    vision_token_pos_enc: str = "rope"
 
 
 class LlavaLlamaModel(LlavaMetaModel, LlamaModel):
@@ -57,6 +59,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         # modify
         self.vision_token_attn = config.vision_token_attn
         self.shuffle_trivial_vision_tokens_keep_percentage = config.shuffle_trivial_vision_tokens_keep_percentage
+        self.method_name = config.method_name
+        self.vision_token_pos_enc = config.vision_token_pos_enc
 
     def get_model(self):
         return self.model
@@ -79,6 +83,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         # modify
         all_image_token_indices: Optional[torch.LongTensor] = None,
         image_attentions: Optional[torch.FloatTensor] = None,
+        is_image_token_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if inputs_embeds is None:
             (
@@ -91,7 +96,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
 
                 # modify
                 all_image_token_indices,
-                image_attentions
+                image_attentions,
+                is_image_token_mask
             ) = self.prepare_inputs_labels_for_multimodal(
                 input_ids,
                 position_ids,
@@ -102,7 +108,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 image_sizes,
                 all_image_token_indices,
                 self.shuffle_trivial_vision_tokens_keep_percentage if self.train() else None,
-                image_attentions
+                self.method_name if self.train() else None,
+                image_attentions,
             )
 
         outputs = super().forward(
@@ -118,11 +125,16 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             return_dict=return_dict,
 
             # modify
-            all_image_token_indices=all_image_token_indices if self.vision_token_attn != "causal" else None,
+            all_image_token_indices=all_image_token_indices if self.vision_token_attn != "causal" or self.vision_token_pos_enc != "rope" else None,
+            is_image_token_mask=is_image_token_mask if self.vision_token_attn != "causal" or self.vision_token_pos_enc != "rope" else None,
         )
 
-        outputs.all_image_token_indices = all_image_token_indices
-        outputs.image_attentions = image_attentions
+        # Temporary fix for multi-gpu inference. Not sure why the returned image token indices is still None
+        output_dict = dict(outputs)
+        output_dict["all_image_token_indices"] = all_image_token_indices
+        output_dict["image_attentions"] = image_attentions
+        outputs = LlamaForCausalLMOutput(**output_dict)
+
         return outputs
 
     @torch.no_grad()
@@ -149,7 +161,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
 
                 #modify
                 all_image_token_indices,
-                image_attentions
+                image_attentions,
+                is_image_token_mask
             ) = self.prepare_inputs_labels_for_multimodal(
                 inputs,
                 position_ids,
@@ -162,12 +175,15 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
             all_image_token_indices = None
+            is_image_token_mask = None
 
         return super().generate(
             position_ids=position_ids,
             attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
+            # modify
             all_image_token_indices=all_image_token_indices,
+            is_image_token_mask=is_image_token_mask,
             **kwargs
         )
 

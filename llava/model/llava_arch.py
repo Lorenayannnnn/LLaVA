@@ -139,18 +139,18 @@ class LlavaMetaForCausalLM(ABC):
         return self.get_model().get_vision_tower()
 
     # modify
-    def encode_images(self, images, shuffle_trivial_vision_tokens_keep_percentage=None):
+    def encode_images(self, images, shuffle_trivial_vision_tokens_keep_percentage=None, method_name=None):
         # image_features = self.get_model().get_vision_tower()(images)
         # image_features = self.get_model().mm_projector(image_features)
         # return image_features
 
         # Reference https://github.com/Theia-4869/FasterVLM
         image_features, image_attentions = self.get_model().get_vision_tower()(images)  # (B, N, C), (B, M, N) = (1, 576, 1024), (1, 16, 576)
+        # Avg across attn heads
+        # image_attentions = image_attentions.max(dim=1)[0] # (B, N) = (1, 576)
+        image_attentions = image_attentions.mean(dim=1)  # (B, N) = (1, 576)
 
-        if shuffle_trivial_vision_tokens_keep_percentage is not None:
-            # image_attentions = image_attentions.max(dim=1)[0] # (B, N) = (1, 576)
-            # Avg across attn heads
-            image_attentions = image_attentions.mean(dim=1)  # (B, N) = (1, 576)
+        if method_name == "shuffle_by_CLS" and shuffle_trivial_vision_tokens_keep_percentage is not None:
 
             B, N = image_features.shape[:2]
             visual_token_num_to_keep = int(N * shuffle_trivial_vision_tokens_keep_percentage)
@@ -182,17 +182,17 @@ class LlavaMetaForCausalLM(ABC):
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
-        images, image_sizes=None, all_image_token_indices=None, shuffle_trivial_vision_tokens_keep_percentage=None, image_attentions=None
+        images, image_sizes=None, all_image_token_indices=None, shuffle_trivial_vision_tokens_keep_percentage=None, method_name=None, image_attentions=None, is_image_token_mask=None
     ):
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
-            return input_ids, position_ids, attention_mask, past_key_values, None, labels, all_image_token_indices, image_attentions
+            return input_ids, position_ids, attention_mask, past_key_values, None, labels, all_image_token_indices, image_attentions, is_image_token_mask
 
         if type(images) is list or images.ndim == 5:
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
             concat_images = torch.cat([image for image in images], dim=0)
-            image_features, image_attentions = self.encode_images(concat_images, shuffle_trivial_vision_tokens_keep_percentage)
+            image_features, image_attentions = self.encode_images(concat_images, shuffle_trivial_vision_tokens_keep_percentage, method_name)
             split_sizes = [image.shape[0] for image in images]
             image_features = torch.split(image_features, split_sizes, dim=0)
             mm_patch_merge_type = getattr(self.config, 'mm_patch_merge_type', 'flat')
@@ -321,7 +321,6 @@ class LlavaMetaForCausalLM(ABC):
 
             # modify
             new_vision_token_idx.append(cur_vision_token_idx)
-
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
         if tokenizer_model_max_length is not None:
@@ -361,6 +360,8 @@ class LlavaMetaForCausalLM(ABC):
                     attention_mask[i, :cur_len] = True
                     position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
 
+                    # No need to modify new_vision_token_idx since padding are added after image tokens
+
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
 
         if _labels is None:
@@ -376,7 +377,13 @@ class LlavaMetaForCausalLM(ABC):
         if _position_ids is None:
             position_ids = None
 
-        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, torch.tensor(new_vision_token_idx), image_attentions
+        # modify
+        # Create is_image_mask from new_vision_token_idx
+        is_image_token_mask = torch.zeros((batch_size, max_len), dtype=torch.bool, device=new_input_embeds.device)
+        for i, cur_vision_token_idx in enumerate(new_vision_token_idx):
+            is_image_token_mask[i, cur_vision_token_idx] = True
+        # TODO fix: don't return new_vision_token_idx and use is_image_token_mask only
+        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, torch.tensor(new_vision_token_idx), image_attentions, is_image_token_mask
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:

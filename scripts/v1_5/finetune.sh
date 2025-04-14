@@ -2,14 +2,17 @@
 
 export WANDB_PROJECT=llava
 vision_token_attn="causal"
-max_train_samples=10000
-shuffle_trivial_vision_tokens_keep_percentage=0.25   # keep top 0.25
-#deepspeed --include=localhost:0,1,2,3 llava/train/train_mem.py \
-deepspeed --master_port=29501 --include=localhost:4,5,6,7 llava/train/train_mem.py \
+max_train_samples=40000
+#shuffle_trivial_vision_tokens_keep_percentage=0.25   # keep top 0.25
+#method_name="dropout_by_last_text_attn"   # shuffle_by_CLS, shuffle_by_last_text, dropout_by_last_text_attn
+vision_token_pos_enc="constant_vis_key"   # rope, none, constant_vis_key, constant_vis_qk
+
+#deepspeed --include=localhost:0,1,2,3 --master_port=29501 llava/train/train_mem.py \
+deepspeed --master_port=29502 --include=localhost:4,5,6,7 llava/train/train_mem.py \
     --deepspeed ./scripts/zero3.json \
     --model_name_or_path lmsys/vicuna-7b-v1.5 \
     --version v1 \
-    --data_path ./playground/data/llava_v1_5_10k_mix.json \
+    --data_path ./playground/data/llava_v1_5_40000_mix.json \
     --image_folder ./playground/data \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --pretrain_mm_mlp_adapter outputs/pretrain_checkpoints/liuhaotian/llava-v1.5-7b/mm_projector.bin \
@@ -39,12 +42,24 @@ deepspeed --master_port=29501 --include=localhost:4,5,6,7 llava/train/train_mem.
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to wandb \
-    --vision_token_attn $vision_token_attn \
-    --shuffle_trivial_vision_tokens_keep_percentage $shuffle_trivial_vision_tokens_keep_percentage \
-    --output_dir "./outputs/checkpoints/train_${max_train_samples}_mix/keep_${shuffle_trivial_vision_tokens_keep_percentage}-vision_${vision_token_attn}-llava-v1.5-7b-finetune" \
-    --run_name "train_${max_train_samples}-keep_${shuffle_trivial_vision_tokens_keep_percentage}_mcq-vision_${vision_token_attn}-llava-v1.5-7b-finetune" \
     --max_train_samples $max_train_samples \
+    --vision_token_attn $vision_token_attn \
+    --vision_token_pos_enc $vision_token_pos_enc \
+    --run_name "train_${max_train_samples}-vis_tok_pos_enc_${vision_token_pos_enc}-vision_${vision_token_attn}-llava-v1.5-7b-finetune" \
+    --output_dir "./outputs/checkpoints/train_${max_train_samples}_mix/vis_tok_pos_enc_${vision_token_pos_enc}-vision_${vision_token_attn}-llava-v1.5-7b-finetune" \
+#    TODO haha
+#    --output_dir "./outputs/checkpoints/train_${max_train_samples}_mix/vision_${vision_token_attn}-llava-v1.5-7b-finetune" \
+#    --output_dir "./outputs/test" \
 
+# Change vision token positional encoding
+#--run_name "train_${max_train_samples}-vis_tok_pos_enc_${vision_token_pos_enc}_mcq-vision_${vision_token_attn}-llava-v1.5-7b-finetune" \
+
+# Shuffle image tokens
+#    --run_name "train_${max_train_samples}-keep_${shuffle_trivial_vision_tokens_keep_percentage}_mcq-vision_${vision_token_attn}-llava-v1.5-7b-finetune" \
+#    --output_dir "./outputs/checkpoints/train_${max_train_samples}_mix/keep_${shuffle_trivial_vision_tokens_keep_percentage}-vision_${vision_token_attn}-llava-v1.5-7b-finetune" \
+#    --shuffle_trivial_vision_tokens_keep_percentage $shuffle_trivial_vision_tokens_keep_percentage \
+
+# Normal / vision tokens full attention
 #    --output_dir "./outputs/checkpoints/train_${max_train_samples}_mix/vision_${vision_token_attn}-llava-v1.5-7b-finetune" \
 #    --run_name "train_${max_train_samples}_mix-vision_${vision_token_attn}-llava-v1.5-7b-finetune" \
 
