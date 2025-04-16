@@ -107,8 +107,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 images,
                 image_sizes,
                 all_image_token_indices,
-                self.shuffle_trivial_vision_tokens_keep_percentage if self.train() else None,
-                self.method_name if self.train() else None,
+                self.shuffle_trivial_vision_tokens_keep_percentage if self.training else None,
+                self.method_name if self.training else None,
                 image_attentions,
             )
 
@@ -125,8 +125,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             return_dict=return_dict,
 
             # modify
-            all_image_token_indices=all_image_token_indices if self.vision_token_attn != "causal" or self.vision_token_pos_enc != "rope" else None,
-            is_image_token_mask=is_image_token_mask if self.vision_token_attn != "causal" or self.vision_token_pos_enc != "rope" else None,
+            all_image_token_indices=all_image_token_indices if self.vision_token_attn != "causal" or self.vision_token_pos_enc != "rope" or self.method_name is not None else None,
+            is_image_token_mask=is_image_token_mask if self.vision_token_attn != "causal" or self.vision_token_pos_enc != "rope" or self.method_name is not None else None,
         )
 
         # Temporary fix for multi-gpu inference. Not sure why the returned image token indices is still None
@@ -177,6 +177,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             all_image_token_indices = None
             is_image_token_mask = None
 
+        # TODO: don't forget to change prepare_inputs_for_generation
         return super().generate(
             position_ids=position_ids,
             attention_mask=attention_mask,
@@ -188,7 +189,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         )
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None,
-                                      inputs_embeds=None, all_image_token_indices=None, **kwargs):
+                                      inputs_embeds=None, all_image_token_indices=None, is_image_token_mask=None, **kwargs):
         images = kwargs.pop("images", None)
         image_sizes = kwargs.pop("image_sizes", None)
         inputs = super().prepare_inputs_for_generation(
@@ -200,6 +201,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             inputs['image_sizes'] = image_sizes
         if all_image_token_indices is not None:
             inputs["all_image_token_indices"] = all_image_token_indices
+        if is_image_token_mask is not None:
+            inputs["is_image_token_mask"] = is_image_token_mask
         return inputs
 
 AutoConfig.register("llava_llama", LlavaConfig)

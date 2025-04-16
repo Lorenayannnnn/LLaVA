@@ -232,7 +232,7 @@ def eval_model(args):
             input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
             image_tensor = process_images(images, image_processor, model.config)
 
-            output = model.generate(input_ids, images=image_tensor.half().cuda(), max_new_tokens=1024,
+            output = model.generate(input_ids, images=image_tensor.half().cuda(), max_new_tokens=100,
                                     return_dict_in_generate=True, do_sample=False, temperature=None, top_p=None)
             decoded_output = tokenizer.batch_decode(output['sequences'], skip_special_tokens=True)[0].strip()
 
@@ -250,6 +250,7 @@ def eval_model(args):
             correct = decoded_output == entry['answer']
 
             # if not correct:
+            #     print(decoded_output, entry["answer"])
             #     breakpoint()
 
             per_type_acc[test_type].append(correct)

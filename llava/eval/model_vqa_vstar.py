@@ -93,7 +93,6 @@ def multiple_choices_inference(model, tokenizer, image_processor, conv_type, ima
     question_input_ids = tokenizer_image_object_token(prompt, tokenizer, IMAGE_TOKEN_INDEX,
                                                       return_tensors='pt').unsqueeze(0).cuda()
     image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-
     output_question = model(
         question_input_ids,
         use_cache=True,
@@ -179,7 +178,6 @@ def eval_model(args):
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
     tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, args.attn_implementation)
-
     questions = pd.read_table(os.path.expanduser(args.question_file))
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
 
@@ -290,6 +288,10 @@ def eval_model(args):
             per_type_acc[test_type].append(correct)
             all_acc.append(correct)
 
+            # if correct == 0:
+            #     print(option_chosen, question, options)
+            #     breakpoint()
+
             result_single_sample['question'] = question
             result_single_sample['options'] = options
             result_single_sample['image'] = image_file
@@ -324,6 +326,7 @@ def eval_model(args):
     acc_str = f"Overall Accuracy: {np.mean(all_acc) * 100:.1f}% ({sum(all_acc)}/{len(all_acc)})"
     with open(os.path.join(args.output_dir, "accuracy.txt"), "a") as f:
         f.write(acc_str + "\n")
+    print(f"Finished evaluating {args.model_path}")
 
 
 if __name__ == "__main__":

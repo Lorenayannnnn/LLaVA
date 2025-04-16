@@ -118,6 +118,10 @@ def load_pretrained_model(model_path, model_base, model_name, attn_implementatio
                     model_path,
                     low_cpu_mem_usage=True,
                     output_loading_info=True,
+
+                    # TODO
+                    # method_name="dropout_by_each_head_each_token_for_all",
+                    # shuffle_trivial_vision_tokens_keep_percentage=0.25,
                     **kwargs
                 )
     else:

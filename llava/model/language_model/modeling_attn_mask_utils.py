@@ -58,7 +58,8 @@ def _prepare_4d_causal_attention_mask(
         )
 
     # modify
-    if vision_token_attn == "full" and all_image_token_indices is not None and attention_mask.size(-2) == attention_mask.size(-1):
+    if vision_token_attn == "full" and attention_mask.size(-2) == attention_mask.size(-1):
+        assert all_image_token_indices is not None
         # For .generate(): no change to attention_mask is needed for tokens after the first generated token
         # Attention_mask shape: (first token after the input) (_, _, seq_len, seq_len). After that (_, _, 1, new_seq_len)
         assert len(attention_mask.shape) == 4
