@@ -23,6 +23,7 @@ import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -52,6 +53,8 @@ from transformers.utils.import_utils import is_torch_fx_available
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from llava.model.language_model.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+
+import wandb
 
 
 if is_flash_attn_2_available():
@@ -239,7 +242,8 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1, is_image
     # modify
     # is_image_token_mask is not None when .generate (generate future text tokens)
     # Note: is_image_token_mask can be None during inference even if it's not .generate (e.g.: vstar append option later and do inference for the second time, which does not have image)
-    if vision_token_pos_enc == "rope" or vision_token_pos_enc == "none" or is_image_token_mask is None:
+    k_embed_image_no_rope = None
+    if vision_token_pos_enc == "rope" or vision_token_pos_enc == "none" or vision_token_pos_enc == "none_for_vis_key" or is_image_token_mask is None:
         cos = cos[position_ids].unsqueeze(unsqueeze_dim)
         sin = sin[position_ids].unsqueeze(unsqueeze_dim)
 
@@ -251,6 +255,9 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1, is_image
             # Remove RoPE for vision tokens
             q_embed = torch.where(is_image_token_mask, q, q_embed)
             k_embed = torch.where(is_image_token_mask, k, k_embed)
+        elif vision_token_pos_enc == "none_for_vis_key":
+            # TODO haha implement
+            raise NotImplementedError
     elif vision_token_pos_enc == "constant_vis_key" and is_image_token_mask is not None:
         # assert is_image_token_mask is not None, "is_image_token_mask should not be None when vision_token_pos_enc is constant_vis_key"
         q_cos = cos[position_ids].unsqueeze(unsqueeze_dim)
@@ -293,6 +300,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1, is_image
     else:
         raise ValueError(f"Unknown vision_token_pos_enc {vision_token_pos_enc}")
 
+    # TODO: modify
     return q_embed, k_embed
 
 
@@ -412,6 +420,46 @@ class LlamaAttention(nn.Module):
             else:
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 
+
+    def get_important_vision_token_mask(self, method_name, to_image_tokens_attn_weight: torch.Tensor, total_image_tok_num: int, keep_image_tok_percentage: float):
+        # to_image_tokens_attn_weight: (bsz, num_heads, q_len, N) for each_token or (bsz, num_heads, N) for last_token
+        if "dropout_by_nucleus" in method_name:
+            # Keep top-k tokens whose attention prob adds up to keep_image_tok_percentage
+            sorted_vals, sorted_indices = torch.sort(to_image_tokens_attn_weight, dim=-1, descending=True)
+            cumulative = torch.cumsum(sorted_vals, dim=-1)
+
+            # Create a mask for the minimal set that adds up to keep_image_tok_percentage
+            keep_mask = cumulative <= keep_image_tok_percentage
+            first_exceed = (~keep_mask).float().cumsum(dim=-1) == 1
+            first_exceed_index = first_exceed.float().argmax(dim=-1)
+            # Detect rows that actually contain True
+            has_exceed = first_exceed.any(dim=-1)  # shape: (...)
+            # wandb.log({
+            #     "important_vision_token_num": np.average(first_exceed_index.cpu().numpy()).item(),
+            #     "total_vision_token_num": total_image_tok_num.item(),
+            #     "important_vision_token_percentage": np.average(first_exceed_index.cpu().numpy()).item() / total_image_tok_num.item() * 100,
+            # })
+
+            N = first_exceed.size(-1)
+            arange = torch.arange(N, device=first_exceed.device).view(*((1,) * (first_exceed.dim() - 1)), N)
+            # Keep all indices before the first exceed
+            keep_mask = arange <= first_exceed_index.unsqueeze(-1)  # shape: (B, num_heads, N)
+            # Zero out rows that had no True
+            keep_mask = keep_mask & has_exceed.unsqueeze(-1)
+            important_mask = torch.zeros_like(keep_mask, dtype=torch.bool, device=keep_mask.device)
+            important_mask.scatter_(dim=-1, index=sorted_indices, src=keep_mask)
+        elif method_name in ["dropout_by_last_text_attn_for_txt", "dropout_by_last_text_attn_for_all", "dropout_by_each_head_each_token_for_txt", "dropout_by_each_head_each_token_for_all", "dropout_by_nucleus_each_head_each_token_for_all"]:
+            keep_image_tok_num = int(total_image_tok_num * keep_image_tok_percentage)
+            important_image_token_indices = torch.topk(to_image_tokens_attn_weight, k=keep_image_tok_num, dim=-1)[1]
+
+            # Create important token index mask (important image tokens and text tokens that the model can still attend to)
+            important_mask = torch.zeros_like(to_image_tokens_attn_weight, dtype=torch.bool, device=to_image_tokens_attn_weight.device)  # (B, num_heads, q_len, N)
+            important_mask.scatter_(dim=-1, index=important_image_token_indices, value=True)
+        else:
+            raise ValueError(f"Unknown method_name {method_name}")
+        return important_mask
+
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -501,29 +549,31 @@ class LlamaAttention(nn.Module):
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
 
         # Attention dropout
-        # print(self.method_name, is_image_token_mask is not None, self.training)
-        # breakpoint()
+        # TODO haha test
         if self.training and self.method_name is not None and self.shuffle_trivial_vision_tokens_keep_percentage is not None:
+        # if self.method_name is not None and self.shuffle_trivial_vision_tokens_keep_percentage is not None:
             assert is_image_token_mask is not None, f"image_token_mask should not be None when using {self.method_name}"
-            if "dropout_by_each_head_each_token" in self.method_name:
+            if "each_head_each_token" in self.method_name:
                 # is_image_token_mask shape: (bsz, N)
                 # Get last text to image tokens attention weight
                 B, head_num, q_len, N = attn_weights.size()
                 # expand is_image_token_mask for attention heads
                 is_image_token_mask = is_image_token_mask.unsqueeze(1).unsqueeze(1).expand(B, head_num, q_len, N)  # bsz, num_heads, q_len, N
                 last_text_to_image_tokens_attn_weight = torch.where(is_image_token_mask, attn_weights, 0)
-
                 # Get important image tokens' indices by last text token's attention (for each head)
-                keep_image_tok_num = int(sum(is_image_token_mask[0][0][0]) * self.shuffle_trivial_vision_tokens_keep_percentage)
-                important_image_token_indices = torch.topk(last_text_to_image_tokens_attn_weight, k=keep_image_tok_num, dim=-1)[1]  # bsz, num_heads, q_len, keep_image_tok_num
+                # keep_image_tok_num = int(sum(is_image_token_mask[0][0][0]) * self.shuffle_trivial_vision_tokens_keep_percentage)
+                # important_image_token_indices = torch.topk(last_text_to_image_tokens_attn_weight, k=keep_image_tok_num, dim=-1)[1]  # bsz, num_heads, q_len, keep_image_tok_num
+
+                total_image_tok_num = sum(is_image_token_mask[0][0][0])
+                important_mask = self.get_important_vision_token_mask(self.method_name, last_text_to_image_tokens_attn_weight, total_image_tok_num, self.shuffle_trivial_vision_tokens_keep_percentage)
+
                 # Create important token index mask (important image tokens and text tokens that the model can still attend to)
-                important_mask = torch.zeros_like(attn_weights, dtype=torch.bool, device=attn_weights.device)  # (B, num_heads, q_len, N)
-                important_mask.scatter_(dim=-1, index=important_image_token_indices, value=True)
                 # Set all text tokens to important as well
                 text_mask = (~is_image_token_mask)
                 important_mask = torch.where(text_mask, True, important_mask)  # (B, num_heads, N)
                 # Expand to B, num_head, q_len, N
-                if self.method_name == "dropout_by_each_head_each_token_for_txt":
+                # if "for_txt" in self.method_name:
+                if self.method_name.endswith("for_txt"):
                     # Set image query token position in mask to True (only masking out image tokens for text tokens, excluding image tokens themselves)
                     for batch_idx in range(B):
                         # Set image query token position to True
@@ -534,27 +584,34 @@ class LlamaAttention(nn.Module):
                 # (Set text-to-unimportant image tokens' attention score to 0)
                 # Set attention to unimportant image tokens to 0
                 attn_weights = torch.where(unimportant_mask, attn_weights, 0)
-            elif "dropout_by_last_text_attn" in self.method_name:       # can be for_text, for_all
+            elif "last_text_attn" in self.method_name:
+                # TODO fix: padding added on the right, so the last token might be padding. Need to get the last non-padding token
+                raise NotImplementedError("TODO fix: padding added on the right, so the last token might be padding. Need to get the last non-padding token")
                 # is_image_token_mask shape: (bsz, N)
                 # Get last text to image tokens attention weight
                 B, head_num, N = attn_weights.size(0), attn_weights.size(1), attn_weights.size(-1)
-                last_text_to_others_attn_weight = attn_weights[:, :, -1, :]      # bsz, num_heads, N
+                last_non_padding_token = torch.where(attention_mask[0][0] == 1)[0][-1] if attention_mask is not None else q_len - 1
+                breakpoint()
+                last_text_to_others_attn_weight = attn_weights[:, :, last_non_padding_token, :]  # bsz, num_heads, N
+                # last_text_to_others_attn_weight = attn_weights[:, :, -1, :]  # bsz, num_heads, N | Wrong. Might be padding
                 # expand is_image_token_mask for attention heads
                 is_image_token_mask = is_image_token_mask.unsqueeze(1).expand(B, head_num, N)  # bsz, num_heads, N
                 last_text_to_image_tokens_attn_weight = torch.where(is_image_token_mask, last_text_to_others_attn_weight, 0)
 
                 # Get important image tokens' indices by last text token's attention (for each head)
-                keep_image_tok_num = int(sum(is_image_token_mask[0][0]) * self.shuffle_trivial_vision_tokens_keep_percentage)
-                important_image_token_indices = torch.topk(last_text_to_image_tokens_attn_weight, k=keep_image_tok_num, dim=-1)[1]  # bsz, num_heads, keep_image_tok_num
-                # Create important token index mask (important image tokens and text tokens that the model can still attend to)
-                important_mask = torch.zeros(B, head_num, N, dtype=torch.bool, device=attn_weights.device)  # (B, num_heads, N)
-                important_mask.scatter_(dim=-1, index=important_image_token_indices, value=True)
+                # keep_image_tok_num = int(sum(is_image_token_mask[0][0]) * self.shuffle_trivial_vision_tokens_keep_percentage)
+                # important_image_token_indices = torch.topk(last_text_to_image_tokens_attn_weight, k=keep_image_tok_num, dim=-1)[1]  # bsz, num_heads, keep_image_tok_num
+
+                total_image_tok_num = sum(is_image_token_mask[0][0])
+                important_mask = self.get_important_vision_token_mask(self.method_name, last_text_to_image_tokens_attn_weight, total_image_tok_num, self.shuffle_trivial_vision_tokens_keep_percentage)
+
                 # Set all text tokens to important as well
                 text_mask = (~is_image_token_mask)
                 important_mask = torch.where(text_mask, True, important_mask)       # (B, num_heads, N)
                 # Expand to B, num_head, q_len, N
                 important_mask = important_mask.unsqueeze(2).expand(B, head_num, q_len, N)  # (B, num_heads, q_len, N)
-                if self.method_name == "dropout_by_last_text_attn_for_txt":
+                # if "for_txt" in self.method_name:
+                if self.method_name.endswith("for_txt"):
                     # Set image query token position in mask to True (only masking out image tokens for text tokens, excluding image tokens themselves)
                     for batch_idx in range(B):
                         # Set image query token position to True
