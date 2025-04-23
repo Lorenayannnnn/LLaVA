@@ -177,9 +177,9 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, args.attn_implementation)
-    questions = pd.read_table(os.path.expanduser(args.question_file))
-    questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, attn_implementation=args.attn_implementation)
+    # questions = pd.read_table(os.path.expanduser(args.question_file))
+    # questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
 
     if 'plain' in model_name and 'finetune' not in model_name.lower() and 'mmtag' not in args.conv_mode:
         args.conv_mode = args.conv_mode + '_mmtag'
@@ -188,13 +188,14 @@ def eval_model(args):
     results = {}
     per_type_acc = defaultdict(list)
     all_acc = []
+    all_last_token_to_all_image_token_attn_scores = []
+    all_CLS_tok_image_attentions = []
 
-    missing_objects_msg = "Sorry, I can not answer the question. Some visual information about the following objects is missing or unclear:"
-    focus_msg = "Additional visual information to focus on: "
+    # missing_objects_msg = "Sorry, I can not answer the question. Some visual information about the following objects is missing or unclear:"
+    # focus_msg = "Additional visual information to focus on: "
     for test_type in ['direct_attributes', 'relative_position']:
-        all_last_token_to_all_image_token_attn_scores = []
-        all_CLS_tok_image_attentions = []
-
+        test_type_last_token_to_all_image_token_attn_scores = []
+        test_type_CLS_tok_image_attentions = []
         results[test_type] = []
         folder = os.path.join(args.image_folder, test_type)
         image_files = list(filter(lambda file: '.json' not in file, os.listdir(folder)))
@@ -247,6 +248,22 @@ def eval_model(args):
             # predict the multiple-choice option
             options = annotation['options']
             image = Image.open(image_path).convert('RGB')
+
+            # Format prompt
+            prompt = question
+            all_option_letters = all_options[:len(options)]
+            # Randomly select one as the label
+            label = np.random.choice(all_option_letters)
+            # The dataset always places the correct answer in the first position
+            incorrect_options = options[1:]
+            option_letter_to_option = {}
+            for option_letter in all_option_letters:
+                if option_letter == label:
+                    option = options[0]
+                else:
+                    option = incorrect_options.pop(0)
+                prompt = prompt + '\n' + option_letter + '. ' + option
+                option_letter_to_option[option_letter] = option
             # if len(missing_objects) > 0:
             #     object_names = [_['name'] for _ in search_result]
             #     bboxs = deepcopy([_['bbox'] for _ in search_result])
@@ -280,32 +297,66 @@ def eval_model(args):
             #     option_chosen = vqa_llm.multiple_choices_inference(image, question_with_focus, options, object_crops,
             #                                                        images_long=images_long, objects_long=objects_long)
             # else:
-            option_chosen, last_token_to_all_image_token_attn_scores, CLS_tok_image_attentions = multiple_choices_inference(model, tokenizer, image_processor, args.conv_mode, image, question, options, do_attn_analysis=True)
+
+            prompt = DEFAULT_IMAGE_TOKEN + '\n' + prompt
+            prompt = prompt + '\n' + "Answer with the option's letter from the given choices directly."
+
+            conv = conv_templates[args.conv_mode].copy()
+            conv.append_message(conv.roles[0], prompt)
+            conv.append_message(conv.roles[1], None)
+            prompt = conv.get_prompt()
+
+            input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
+            image_tensor = process_images([image], image_processor, model.config)
+
+            output = model.generate(input_ids, images=image_tensor.half().cuda(), max_new_tokens=100, return_dict_in_generate=True, do_sample=False, temperature=None, top_p=None)
+            decoded_output = tokenizer.batch_decode(output['sequences'], skip_special_tokens=True)[0].strip()
+
+            # Analyze attention
+            outputs_for_attn_analysis = model(input_ids, use_cache=True, images=image_tensor.half().cuda(), output_attentions=True)
+
+            if decoded_output.startswith(label):
+                correct = 1
+            else:
+                print(f"Prompt: {prompt}")
+                print("--------")
+                print(f"Label: {label}")
+                print("--------")
+                print("Decoded output:", decoded_output)
+                print("--------")
+                correct = 0
+                breakpoint()
+
+            # option_chosen, last_token_to_all_image_token_attn_scores, CLS_tok_image_attentions = multiple_choices_inference(model, tokenizer, image_processor, args.conv_mode, image, question, options, do_attn_analysis=True)
 
             # Note: the first option of all options is always the correct one
             # which is why we consider it's correct if option_chosen == 0
-            correct = 1 if option_chosen == 0 else 0
+            batch_size = input_ids.size(0)
+            assert batch_size == 1
+            last_token_attn_scores = outputs_for_attn_analysis.attentions[-1][0, :, -1, :]
+            avg_last_token_attn_scores = torch.mean(last_token_attn_scores, dim=0)
+            all_image_token_indices = outputs_for_attn_analysis.all_image_token_indices[0]
+            last_token_to_all_image_token_attn_scores = avg_last_token_attn_scores[all_image_token_indices].cpu().tolist()
+            CLS_tok_image_attentions = outputs_for_attn_analysis.image_attentions[0].cpu().tolist()
+
             per_type_acc[test_type].append(correct)
             all_acc.append(correct)
 
-            # if correct == 0:
-            #     print(option_chosen, question, options)
-            #     breakpoint()
-
             result_single_sample['question'] = question
             result_single_sample['options'] = options
+            result_single_sample['option_letter_to_option'] = option_letter_to_option
+            result_single_sample['label'] = label
             result_single_sample['image'] = image_file
-            # result_single_sample['prediction_freeform'] = prediction
-            # result_single_sample['missing_objects'] = missing_objects
-            # result_single_sample['search_result'] = search_result
-            result_single_sample['option_chosen'] = option_chosen
+            result_single_sample['output'] = decoded_output
             result_single_sample['correct'] = correct
             result_single_sample['last_token_to_all_image_token_attn_scores'] = last_token_to_all_image_token_attn_scores
             result_single_sample['CLS_tok_image_attentions'] = CLS_tok_image_attentions
+            results[test_type].append(result_single_sample)
+
+            test_type_last_token_to_all_image_token_attn_scores.append(last_token_to_all_image_token_attn_scores)
+            test_type_CLS_tok_image_attentions.append(CLS_tok_image_attentions)
             all_last_token_to_all_image_token_attn_scores.append(last_token_to_all_image_token_attn_scores)
             all_CLS_tok_image_attentions.append(CLS_tok_image_attentions)
-
-            results[test_type].append(result_single_sample)
 
             progress.set_description(f"{test_type} Acc: {np.mean(per_type_acc[test_type]) * 100:.1f}%")
 
@@ -317,10 +368,16 @@ def eval_model(args):
             f.write(acc_str + "\n")
 
         # Visualize avg all_last_token_to_all_image_token_attn_scores and all_CLS_tok_image_attentions
-        avg_last_token_to_all_image_token_attn_scores = np.average(np.array(all_last_token_to_all_image_token_attn_scores), axis=0)
-        visualize_token_to_vis_token_attn_scores(avg_last_token_to_all_image_token_attn_scores, "Last Text To Image Token Attn Score", os.path.join(args.output_dir, f"{test_type}_last_txt_to_image_attn_score.png"))
-        avg_CLS_tok_image_attentions = np.average(np.array(all_CLS_tok_image_attentions), axis=0)
-        visualize_token_to_vis_token_attn_scores(avg_CLS_tok_image_attentions, "CLS To Image Token Attn Score", os.path.join(args.output_dir, f"{test_type}_CLS_image_attn_score.png"))
+        avg_last_token_to_all_image_token_attn_scores = np.average(np.array(test_type_last_token_to_all_image_token_attn_scores), axis=0)
+        visualize_token_to_vis_token_attn_scores(avg_last_token_to_all_image_token_attn_scores, f"{test_type}: Last Text To Image Token Attn Score", os.path.join(args.output_dir, f"{test_type}_last_txt_to_image_attn_score.png"))
+        avg_CLS_tok_image_attentions = np.average(np.array(test_type_CLS_tok_image_attentions), axis=0)
+        visualize_token_to_vis_token_attn_scores(avg_CLS_tok_image_attentions, f"{test_type}: CLS To Image Token Attn Score", os.path.join(args.output_dir, f"{test_type}_CLS_image_attn_score.png"))
+
+    # Visualize avg all_last_token_to_all_image_token_attn_scores and all_CLS_tok_image_attentions
+    avg_last_token_to_all_image_token_attn_scores = np.average(np.array(all_last_token_to_all_image_token_attn_scores), axis=0)
+    visualize_token_to_vis_token_attn_scores(avg_last_token_to_all_image_token_attn_scores, "Last Text To Image Token Attn Score", os.path.join(args.output_dir, f"{test_type}_last_txt_to_image_attn_score.png"))
+    avg_CLS_tok_image_attentions = np.average(np.array(all_CLS_tok_image_attentions), axis=0)
+    visualize_token_to_vis_token_attn_scores(avg_CLS_tok_image_attentions, "CLS To Image Token Attn Score", os.path.join(args.output_dir, f"{test_type}_CLS_image_attn_score.png"))
 
     print(np.mean(all_acc))
     acc_str = f"Overall Accuracy: {np.mean(all_acc) * 100:.1f}% ({sum(all_acc)}/{len(all_acc)})"
@@ -332,6 +389,7 @@ def eval_model(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str)
+    # Added for LoRA
     parser.add_argument("--model-base", type=str, default=None)
     parser.add_argument("--image-folder", type=str)
     parser.add_argument("--question-file", type=str)

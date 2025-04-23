@@ -21,6 +21,7 @@ import json
 import logging
 import pathlib
 from typing import Dict, Optional, Sequence, List
+import wandb
 
 import torch
 
@@ -117,6 +118,7 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_dropout: float = 0.05
     lora_weight_path: str = ""
     lora_bias: str = "none"
+    lora_target_modules: List[str] = field(default_factory=lambda: ["q_proj", "k_proj"])
     mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
 
@@ -798,6 +800,15 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
                 data_collator=data_collator)
 
 
+def prepare_wandb(use_wandb, wandb_run_name):
+    # TODO fix: not sure why every experiment starts two wandb run
+    if use_wandb:
+        wandb.init(project=os.environ["WANDB_PROJECT"], name=wandb_run_name)
+        wandb.log({
+            "CUDA_VISIBLE_DEVICES": os.environ["CUDA_VISIBLE_DEVICES"],
+        })
+
+
 def train(attn_implementation=None):
     global local_rank
 
@@ -806,6 +817,8 @@ def train(attn_implementation=None):
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
+
+    prepare_wandb("wandb" in training_args.report_to, training_args.run_name)
 
     # resume_from_checkpoint = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")) is not None
     resume_from_checkpoint = "checkpoints" in model_args.model_name_or_path
@@ -893,10 +906,11 @@ def train(attn_implementation=None):
         lora_config = LoraConfig(
             r=training_args.lora_r,
             lora_alpha=training_args.lora_alpha,
-            target_modules=find_all_linear_names(model),
+            target_modules=training_args.lora_target_modules,
+            # target_modules=find_all_linear_names(model),
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
-            task_type="CAUSAL_LM",
+            # task_type="CAUSAL_LM",
         )
         if training_args.bits == 16:
             if training_args.bf16:

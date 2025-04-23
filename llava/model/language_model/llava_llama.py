@@ -29,6 +29,7 @@ from ..llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
 
 
 class LlavaConfig(LlamaConfig):
+    attn_implementation = "eager"
     model_type = "llava_llama"
     vision_token_attn: str = "causal"
     shuffle_trivial_vision_tokens_keep_percentage: float = None
@@ -48,6 +49,9 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
 
     def __init__(self, config):
         super(LlamaForCausalLM, self).__init__(config)
+        # TODO for inference loading LoRA
+        config._attn_implementation = config.attn_implementation
+
         self.model = LlavaLlamaModel(config)
         self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size

@@ -23,8 +23,8 @@ from llava.model import *
 from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 
-def load_pretrained_model(model_path, model_base, model_name, attn_implementation, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
-    kwargs = {"device_map": device_map, "attn_implementation": attn_implementation, **kwargs}
+def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
+    kwargs = {"device_map": device_map, **kwargs}
 
     if device != "cuda":
         kwargs['device_map'] = {"": device}
@@ -52,9 +52,19 @@ def load_pretrained_model(model_path, model_base, model_name, attn_implementatio
         if 'lora' in model_name.lower() and model_base is not None:
             from llava.model.language_model.llava_llama import LlavaConfig
             lora_cfg_pretrained = LlavaConfig.from_pretrained(model_path)
+            lora_cfg_pretrained.attn_implementation = kwargs.get('attn_implementation', 'eager')
+            print("!!!!!! Use Eager attention")
             tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
-            print('Loading LLaVA from base model...')
-            model = LlavaLlamaForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
+
+            # TODO
+            lora_cfg_pretrained.method_name = "dropout_by_nucleus_each_head_each_token_for_all"
+            lora_cfg_pretrained.shuffle_trivial_vision_tokens_keep_percentage = 0.9
+            model = LlavaLlamaForCausalLM.from_pretrained(
+                model_base,
+                low_cpu_mem_usage=True,
+                config=lora_cfg_pretrained,
+                **kwargs
+            )
             token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
             if model.lm_head.weight.shape[0] != token_num:
                 model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
@@ -62,7 +72,9 @@ def load_pretrained_model(model_path, model_base, model_name, attn_implementatio
 
             print('Loading additional LLaVA weights...')
             if os.path.exists(os.path.join(model_path, 'non_lora_trainables.bin')):
+                # Note: if mm_projector is tuned, it will be saved in non_lora_trainables.bin
                 non_lora_trainables = torch.load(os.path.join(model_path, 'non_lora_trainables.bin'), map_location='cpu')
+                print(f"Loaded {non_lora_trainables.keys()}")
             else:
                 # this is probably from HF Hub
                 from huggingface_hub import hf_hub_download

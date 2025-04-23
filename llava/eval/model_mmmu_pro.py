@@ -183,7 +183,7 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, args.attn_implementation)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, attn_implementation=args.attn_implementation)
 
     results = {}
     per_type_acc = defaultdict(list)
@@ -265,11 +265,6 @@ def eval_model(args):
             result_single_sample['last_token_to_all_image_token_attn_scores'] = last_token_to_all_image_token_attn_scores
             result_single_sample['CLS_tok_image_attentions'] = CLS_tok_image_attentions
             test_type_last_token_to_all_image_token_attn_scores.append(last_token_to_all_image_token_attn_scores)
-            try:
-                if len(test_type_last_token_to_all_image_token_attn_scores) > 1:
-                    assert len(last_token_to_all_image_token_attn_scores) == len(test_type_last_token_to_all_image_token_attn_scores[-2])
-            except:
-                breakpoint()
             test_type_CLS_tok_image_attentions.append(CLS_tok_image_attentions)
             all_last_token_to_all_image_token_attn_scores.append(last_token_to_all_image_token_attn_scores)
             all_CLS_tok_image_attentions.append(CLS_tok_image_attentions)
@@ -286,11 +281,7 @@ def eval_model(args):
             f.write(acc_str + "\n")
 
         # Visualize avg all_last_token_to_all_image_token_attn_scores and all_CLS_tok_image_attentions
-        try:
-            avg_last_token_to_all_image_token_attn_scores = np.average(
-                np.array(test_type_last_token_to_all_image_token_attn_scores), axis=0)
-        except:
-            breakpoint()
+        avg_last_token_to_all_image_token_attn_scores = np.average(np.array(test_type_last_token_to_all_image_token_attn_scores), axis=0)
         visualize_token_to_vis_token_attn_scores(avg_last_token_to_all_image_token_attn_scores, "Last Text To Image Token Attn Score", os.path.join(args.output_dir, f"{test_type}_last_txt_to_image_attn_score.png"))
         avg_CLS_tok_image_attentions = np.average(np.array(test_type_CLS_tok_image_attentions), axis=0)
         visualize_token_to_vis_token_attn_scores(avg_CLS_tok_image_attentions, "CLS To Image Token Attn Score", os.path.join(args.output_dir, f"{test_type}_CLS_image_attn_score.png"))
