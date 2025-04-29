@@ -19,6 +19,7 @@
 # limitations under the License.
 """ PyTorch LLaMA model."""
 import math
+import os
 import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
@@ -350,6 +351,17 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+def renormalize_weights(weights: torch.Tensor, return_dtype=None):
+    return_dtype = weights.dtype if return_dtype is None else return_dtype
+    weights = weights.to(torch.float32)
+    weights_sum = weights.sum(dim=-1, keepdim=True)
+    renormalized_weights = weights / weights_sum
+    # Set nan ones to 0
+    renormalized_weights = torch.nan_to_num(renormalized_weights, nan=0.0, posinf=0.0, neginf=0.0)
+    renormalized_weights = renormalized_weights.to(return_dtype)
+    return renormalized_weights
+
+
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
     # modify vision_token_pos_enc
@@ -421,36 +433,54 @@ class LlamaAttention(nn.Module):
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 
 
-    def get_important_vision_token_mask(self, method_name, to_image_tokens_attn_weight: torch.Tensor, total_image_tok_num: int, keep_image_tok_percentage: float):
-        # to_image_tokens_attn_weight: (bsz, num_heads, q_len, N) for each_token or (bsz, num_heads, N) for last_token
+    def get_important_vision_token_mask(self, method_name, to_image_tokens_attn_weight: torch.Tensor, total_image_tok_num: int, keep_image_tok_percentage: float, is_image_token_mask):
+        # self.method_name, last_text_to_image_tokens_attn_weight, total_image_tok_num, self.shuffle_trivial_vision_tokens_keep_percentage
+        # to_image_tokens_attn_weight: (bsz, num_heads, q_len, N) for each_token or (bsz, num_heads, N) for last_token (weight is 0 for non-image tokens, so the sum of weight may not be one)
+
+        # Renormalize attention weights
+        renormalized_weights = renormalize_weights(to_image_tokens_attn_weight, torch.float32)
         if "dropout_by_nucleus" in method_name:
             # Keep top-k tokens whose attention prob adds up to keep_image_tok_percentage
-            sorted_vals, sorted_indices = torch.sort(to_image_tokens_attn_weight, dim=-1, descending=True)
+            # renormalized_to_image_tokens_attn_weight = torch.softmax(to_image_tokens_attn_weight, dim=-1)
+            sorted_vals, sorted_indices = torch.sort(renormalized_weights, dim=-1, descending=True)
             cumulative = torch.cumsum(sorted_vals, dim=-1)
-
             # Create a mask for the minimal set that adds up to keep_image_tok_percentage
-            keep_mask = cumulative <= keep_image_tok_percentage
-            first_exceed = (~keep_mask).float().cumsum(dim=-1) == 1
-            first_exceed_index = first_exceed.float().argmax(dim=-1)
+            # reached = torch.isclose(cumulative, torch.tensor(keep_image_tok_percentage, dtype=cumulative.dtype), atol=1e-3, rtol=0.0) | (cumulative > keep_image_tok_percentage)      # Allow for 0.1% error
+            # reached = torch.isclose(cumulative, torch.tensor(keep_image_tok_percentage, dtype=cumulative.dtype), atol=torch.finfo(torch.float16).tiny, rtol=0.0) | (cumulative > keep_image_tok_percentage)
+            reached = torch.isclose(cumulative, torch.tensor(keep_image_tok_percentage, dtype=cumulative.dtype), atol=torch.finfo(cumulative.dtype).tiny, rtol=0.0) | (cumulative > keep_image_tok_percentage)
+            #to_image_tokens_attn_weight[0][0][576]
+            #sorted_vals[0][0][575]
+            #sorted_indices[0][0][-1]
+            #renormalized_weights[0][0][575]
+            #cumulative[0][0][-1]
+            #first_exceed_index[0][0][-1]
+            first_exceed_index = reached.float().argmax(dim=-1)
             # Detect rows that actually contain True
-            has_exceed = first_exceed.any(dim=-1)  # shape: (...)
-            # wandb.log({
-            #     "important_vision_token_num": np.average(first_exceed_index.cpu().numpy()).item(),
-            #     "total_vision_token_num": total_image_tok_num.item(),
-            #     "important_vision_token_percentage": np.average(first_exceed_index.cpu().numpy()).item() / total_image_tok_num.item() * 100,
-            # })
-
-            N = first_exceed.size(-1)
-            arange = torch.arange(N, device=first_exceed.device).view(*((1,) * (first_exceed.dim() - 1)), N)
-            # Keep all indices before the first exceed
+            has_exceed = reached.any(dim=-1)
+            if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+                # Use tokens after image tokens to calculate percentage of important image tokens (in case it's causal masking for image tokens)
+                not_image_mask = ~is_image_token_mask[:, :, 0, :]
+                # print(np.average(first_exceed_index[not_image_mask].cpu().numpy()).item() / total_image_tok_num.item() * 100)
+                # print(np.average(first_exceed_index.cpu().numpy()).item() / total_image_tok_num.item() * 100)
+                # breakpoint()
+                wandb.log({
+                    # "important_vision_token_num": np.average(first_exceed_index.cpu().numpy()).item(),
+                    "important_vision_token_num": np.average(first_exceed_index[not_image_mask].cpu().numpy()).item(),
+                    "total_vision_token_num": total_image_tok_num.item(),
+                    # "important_vision_token_percentage": np.average(first_exceed_index.cpu().numpy()).item() / total_image_tok_num.item() * 100,
+                    "important_vision_token_percentage": np.average(first_exceed_index[not_image_mask].cpu().numpy()).item() / total_image_tok_num.item() * 100,
+                })
+            N = first_exceed_index.size(-1)
+            arange = torch.arange(N, device=first_exceed_index.device).view(*((1,) * (first_exceed_index.dim() - 1)), N)
+            # Keep all indices before the first exceed position in sorted_indices
             keep_mask = arange <= first_exceed_index.unsqueeze(-1)  # shape: (B, num_heads, N)
             # Zero out rows that had no True
             keep_mask = keep_mask & has_exceed.unsqueeze(-1)
             important_mask = torch.zeros_like(keep_mask, dtype=torch.bool, device=keep_mask.device)
-            important_mask.scatter_(dim=-1, index=sorted_indices, src=keep_mask)
+            important_mask.scatter_(dim=-1, index=sorted_indices, src=keep_mask)    # At sorted_indices[i] position of important_mask, set the value to keep_mask[i]
         elif method_name in ["dropout_by_last_text_attn_for_txt", "dropout_by_last_text_attn_for_all", "dropout_by_each_head_each_token_for_txt", "dropout_by_each_head_each_token_for_all", "dropout_by_nucleus_each_head_each_token_for_all"]:
             keep_image_tok_num = int(total_image_tok_num * keep_image_tok_percentage)
-            important_image_token_indices = torch.topk(to_image_tokens_attn_weight, k=keep_image_tok_num, dim=-1)[1]
+            important_image_token_indices = torch.topk(renormalized_weights, k=keep_image_tok_num, dim=-1)[1]
 
             # Create important token index mask (important image tokens and text tokens that the model can still attend to)
             important_mask = torch.zeros_like(to_image_tokens_attn_weight, dtype=torch.bool, device=to_image_tokens_attn_weight.device)  # (B, num_heads, q_len, N)
@@ -565,25 +595,26 @@ class LlamaAttention(nn.Module):
                 # important_image_token_indices = torch.topk(last_text_to_image_tokens_attn_weight, k=keep_image_tok_num, dim=-1)[1]  # bsz, num_heads, q_len, keep_image_tok_num
 
                 total_image_tok_num = sum(is_image_token_mask[0][0][0])
-                important_mask = self.get_important_vision_token_mask(self.method_name, last_text_to_image_tokens_attn_weight, total_image_tok_num, self.shuffle_trivial_vision_tokens_keep_percentage)
+                important_mask = self.get_important_vision_token_mask(self.method_name, last_text_to_image_tokens_attn_weight, total_image_tok_num, self.shuffle_trivial_vision_tokens_keep_percentage, is_image_token_mask)
 
                 # Create important token index mask (important image tokens and text tokens that the model can still attend to)
                 # Set all text tokens to important as well
-                text_mask = (~is_image_token_mask)
-                important_mask = torch.where(text_mask, True, important_mask)  # (B, num_heads, N)
+                non_image_mask = (~is_image_token_mask)     # Note this includes padding tokens
+                important_mask = torch.where(non_image_mask, True, important_mask)  # (B, num_heads, N)
                 # Expand to B, num_head, q_len, N
                 # if "for_txt" in self.method_name:
                 if self.method_name.endswith("for_txt"):
                     # Set image query token position in mask to True (only masking out image tokens for text tokens, excluding image tokens themselves)
                     for batch_idx in range(B):
                         # Set image query token position to True
-                        important_mask[batch_idx, :, all_image_token_indices[batch_idx],
-                        all_image_token_indices[batch_idx]] = True
+                        important_mask[batch_idx, :, all_image_token_indices[batch_idx], all_image_token_indices[batch_idx]] = True
 
                 unimportant_mask = ~important_mask
-                # (Set text-to-unimportant image tokens' attention score to 0)
                 # Set attention to unimportant image tokens to 0
-                attn_weights = torch.where(unimportant_mask, attn_weights, 0)
+                attn_weights = torch.where(unimportant_mask, 0, attn_weights)
+
+                if "renormalize" in self.method_name:
+                    attn_weights = renormalize_weights(attn_weights, query_states.dtype)
             elif "last_text_attn" in self.method_name:
                 # TODO fix: padding added on the right, so the last token might be padding. Need to get the last non-padding token
                 raise NotImplementedError("TODO fix: padding added on the right, so the last token might be padding. Need to get the last non-padding token")
@@ -603,11 +634,11 @@ class LlamaAttention(nn.Module):
                 # important_image_token_indices = torch.topk(last_text_to_image_tokens_attn_weight, k=keep_image_tok_num, dim=-1)[1]  # bsz, num_heads, keep_image_tok_num
 
                 total_image_tok_num = sum(is_image_token_mask[0][0])
-                important_mask = self.get_important_vision_token_mask(self.method_name, last_text_to_image_tokens_attn_weight, total_image_tok_num, self.shuffle_trivial_vision_tokens_keep_percentage)
+                important_mask = self.get_important_vision_token_mask(self.method_name, last_text_to_image_tokens_attn_weight, total_image_tok_num, self.shuffle_trivial_vision_tokens_keep_percentage, is_image_token_mask)
 
-                # Set all text tokens to important as well
-                text_mask = (~is_image_token_mask)
-                important_mask = torch.where(text_mask, True, important_mask)       # (B, num_heads, N)
+                # Set all non_image_mask to important as well (Keep all non_image_mask)
+                non_image_mask = (~is_image_token_mask)
+                important_mask = torch.where(non_image_mask, True, important_mask)       # (B, num_heads, N)
                 # Expand to B, num_head, q_len, N
                 important_mask = important_mask.unsqueeze(2).expand(B, head_num, q_len, N)  # (B, num_heads, q_len, N)
                 # if "for_txt" in self.method_name:
@@ -620,7 +651,10 @@ class LlamaAttention(nn.Module):
                 unimportant_mask = ~important_mask
                 # (Set text-to-unimportant image tokens' attention score to 0)
                 # Set attention to unimportant image tokens to 0
-                attn_weights = torch.where(unimportant_mask, attn_weights, 0)
+                attn_weights = torch.where(unimportant_mask, 0, attn_weights)
+
+                if "renormalize" in self.method_name:
+                    attn_weights = renormalize_weights(attn_weights, query_states.dtype)
 
 
         attn_output = torch.matmul(attn_weights, value_states)

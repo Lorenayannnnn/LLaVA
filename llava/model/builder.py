@@ -56,9 +56,9 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             print("!!!!!! Use Eager attention")
             tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
 
-            # TODO
-            lora_cfg_pretrained.method_name = "dropout_by_nucleus_each_head_each_token_for_all"
-            lora_cfg_pretrained.shuffle_trivial_vision_tokens_keep_percentage = 0.9
+            # TODO haha test
+            # lora_cfg_pretrained.method_name = "dropout_by_nucleus_renormalize_each_head_each_token_for_all"
+            # lora_cfg_pretrained.shuffle_trivial_vision_tokens_keep_percentage = 0.9
             model = LlavaLlamaForCausalLM.from_pretrained(
                 model_base,
                 low_cpu_mem_usage=True,

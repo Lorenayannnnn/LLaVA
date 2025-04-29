@@ -32,10 +32,15 @@
 #MODEL_PATH=/home/tianyi/LLaVA/outputs/lora_checkpoints/q_proj_v_proj/train_40000_mix/dropout_by_each_head_each_token_for_txt_keep_0.7_vision_full-llava-v1.5-7b-lora
 #MODEL_PATH=/home/tianyi/LLaVA/outputs/lora_checkpoints/q_proj_v_proj/train_40000_mix/dropout_by_each_head_each_token_for_all_keep_0.7_vision_full-llava-v1.5-7b-lora
 # LoRA + attn dropout + p sampling
-MODEL_PATH=/home/tianyi/LLaVA/outputs/lora_checkpoints/q_proj_v_proj/train_40000_mix/dropout_by_nucleus_each_head_each_token_for_all_keep_0.9_vision_full-llava-v1.5-7b-lora
+#MODEL_PATH=/home/tianyi/LLaVA/outputs/lora_checkpoints/q_proj_v_proj/train_40000_mix/dropout_by_nucleus_each_head_each_token_for_all_keep_0.9_vision_full-llava-v1.5-7b-lora
 #MODEL_PATH=/home/tianyi/LLaVA/outputs/lora_checkpoints/q_proj_v_proj/train_40000_mix/dropout_by_nucleus_each_head_each_token_for_txt_keep_0.9_vision_full-llava-v1.5-7b-lora
-DEVICE=0,1
-#DEVICE=2,3
+
+#MODEL_PATH=outputs/lora_checkpoints/q_proj_v_proj_k_proj_o_proj/20250428_train_40000_mix/vision_causal-llava-v1.5-7b-lora
+#MODEL_PATH=outputs/lora_checkpoints/q_proj_v_proj_k_proj_o_proj/20250428_train_40000_mix/vision_full-llava-v1.5-7b-lora
+MODEL_PATH=outputs/lora_checkpoints/q_proj_v_proj_k_proj_o_proj/20250428_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_all_keep_0.9_vision_causal-llava-v1.5-7b-lora
+#MODEL_PATH=outputs/lora_checkpoints/q_proj_v_proj_k_proj_o_proj/20250428_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_txt_keep_0.9_vision_causal-llava-v1.5-7b-lora
+DEVICE=2,3
+#DEVICE=4,5
 
 
 echo "Evaluate ${MODEL_PATH}"

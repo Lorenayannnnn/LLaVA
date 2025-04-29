@@ -318,14 +318,14 @@ def eval_model(args):
             if decoded_output.startswith(label):
                 correct = 1
             else:
-                print(f"Prompt: {prompt}")
-                print("--------")
-                print(f"Label: {label}")
-                print("--------")
-                print("Decoded output:", decoded_output)
-                print("--------")
+                # print(f"Prompt: {prompt}")
+                # print("--------")
+                # print(f"Label: {label}")
+                # print("--------")
+                # print("Decoded output:", decoded_output)
+                # print("--------")
                 correct = 0
-                breakpoint()
+                # breakpoint()
 
             # option_chosen, last_token_to_all_image_token_attn_scores, CLS_tok_image_attentions = multiple_choices_inference(model, tokenizer, image_processor, args.conv_mode, image, question, options, do_attn_analysis=True)
 

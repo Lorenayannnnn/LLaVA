@@ -800,9 +800,9 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
                 data_collator=data_collator)
 
 
-def prepare_wandb(use_wandb, wandb_run_name):
+def prepare_wandb(use_wandb, wandb_run_name, local_rank):
     # TODO fix: not sure why every experiment starts two wandb run
-    if use_wandb:
+    if use_wandb and (local_rank == 0 or local_rank == -1):
         wandb.init(project=os.environ["WANDB_PROJECT"], name=wandb_run_name)
         wandb.log({
             "CUDA_VISIBLE_DEVICES": os.environ["CUDA_VISIBLE_DEVICES"],
@@ -818,7 +818,7 @@ def train(attn_implementation=None):
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
-    prepare_wandb("wandb" in training_args.report_to, training_args.run_name)
+    prepare_wandb("wandb" in training_args.report_to, training_args.run_name, local_rank)
 
     # resume_from_checkpoint = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")) is not None
     resume_from_checkpoint = "checkpoints" in model_args.model_name_or_path

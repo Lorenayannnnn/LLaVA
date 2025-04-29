@@ -301,7 +301,7 @@ class LlavaMetaForCausalLM(ABC):
                 cur_new_labels.append(cur_labels_noim[i])
                 if i < num_images:
                     # modify
-                    before_add_image_len = len(cur_new_input_embeds)
+                    before_add_image_len = len(cur_new_input_embeds[-1])
 
                     cur_image_features = image_features[cur_image_idx]
                     cur_image_idx += 1
