@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Get the current date in YYYYMMDD format
-current_date=$(date +"%Y%m%d")
+#current_date=$(date +"%Y%m%d")
+current_date="20250428"
 export WANDB_PROJECT=llava
 vision_token_attn="full"
 max_train_samples=40000

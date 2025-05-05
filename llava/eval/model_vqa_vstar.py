@@ -309,11 +309,13 @@ def eval_model(args):
             input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
             image_tensor = process_images([image], image_processor, model.config)
 
+            # TODO test
             output = model.generate(input_ids, images=image_tensor.half().cuda(), max_new_tokens=100, return_dict_in_generate=True, do_sample=False, temperature=None, top_p=None)
             decoded_output = tokenizer.batch_decode(output['sequences'], skip_special_tokens=True)[0].strip()
 
             # Analyze attention
             outputs_for_attn_analysis = model(input_ids, use_cache=True, images=image_tensor.half().cuda(), output_attentions=True)
+            # decoded_output = tokenizer.decode(torch.argmax(outputs_for_attn_analysis.logits[0][-1]))
 
             if decoded_output.startswith(label):
                 correct = 1
@@ -379,8 +381,8 @@ def eval_model(args):
     avg_CLS_tok_image_attentions = np.average(np.array(all_CLS_tok_image_attentions), axis=0)
     visualize_token_to_vis_token_attn_scores(avg_CLS_tok_image_attentions, "CLS To Image Token Attn Score", os.path.join(args.output_dir, f"{test_type}_CLS_image_attn_score.png"))
 
-    print(np.mean(all_acc))
     acc_str = f"Overall Accuracy: {np.mean(all_acc) * 100:.1f}% ({sum(all_acc)}/{len(all_acc)})"
+    print(acc_str)
     with open(os.path.join(args.output_dir, "accuracy.txt"), "a") as f:
         f.write(acc_str + "\n")
     print(f"Finished evaluating {args.model_path}")

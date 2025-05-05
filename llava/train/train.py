@@ -906,8 +906,8 @@ def train(attn_implementation=None):
         lora_config = LoraConfig(
             r=training_args.lora_r,
             lora_alpha=training_args.lora_alpha,
-            target_modules=training_args.lora_target_modules,
-            # target_modules=find_all_linear_names(model),
+            # target_modules=training_args.lora_target_modules,
+            target_modules=find_all_linear_names(model) if training_args.lora_target_modules[0] == "all" else training_args.lora_target_modules,
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
             # task_type="CAUSAL_LM",

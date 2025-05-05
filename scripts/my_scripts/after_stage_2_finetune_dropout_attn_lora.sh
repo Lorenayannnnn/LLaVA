@@ -2,30 +2,29 @@
 
 # Get the current date in YYYYMMDD format
 #current_date=$(date +"%Y%m%d")
-current_date="20250428"
+current_date="20250507"
 export WANDB_PROJECT=llava
 vision_token_attn="causal"
 max_train_samples=40000
-shuffle_trivial_vision_tokens_keep_percentage=0.9   # keep top 0.25
+shuffle_trivial_vision_tokens_keep_percentage=0.5   # keep top 0.25
 #method_name="dropout_by_each_head_each_token_for_txt"   # shuffle_by_CLS, shuffle_by_last_text, dropout_by_last_text_attn_for_txt, dropout_by_last_text_attn_for_all, dropout_by_each_head_each_token_for_txt, dropout_by_each_head_each_token_for_all, dropout_by_nucleus_each_head_each_token_for_all, dropout_by_nucleus_renormalize_each_head_each_token_for_all
 method_name="dropout_by_nucleus_renormalize_each_head_each_token_for_all"
 #method_name="dropout_by_nucleus_renormalize_each_head_each_token_for_txt"
-#method_name="dropout_by_nucleus_each_head_each_token_for_txt"
 vision_token_pos_enc="rope"   # rope, none, constant_vis_key, constant_vis_qk, none_for_vis_key
-lora_target_modules=("q_proj" "v_proj" "k_proj" "o_proj")     #gate_proj, down_proj, up_proj, q_proj, v_proj, k_proj, o_proj
+#lora_target_modules=("q_proj" "v_proj" "k_proj" "o_proj")     #gate_proj, down_proj, up_proj, q_proj, v_proj, k_proj, o_proj
+lora_target_modules=("all")
 lora_target_modules_str=$(IFS=_; echo "${lora_target_modules[*]}")
 
-#deepspeed --master_port=29502 --include=localhost:4,5,6,7 llava/train/train_mem.py \
-deepspeed --include=localhost:0,1,4,5 --master_port=29501 llava/train/train_mem.py \
+#deepspeed --include=localhost:1,2,3 --master_port=29501 llava/train/train_mem.py \
+deepspeed --master_port=29502 --include=localhost:1,2,3,6 llava/train/train_mem.py \
     --lora_enable True --lora_r 128 --lora_alpha 256 --lora_target_modules "${lora_target_modules[@]}" \
     --mm_projector_lr 2e-5 \
     --deepspeed ./scripts/zero3.json \
-    --model_name_or_path lmsys/vicuna-7b-v1.5 \
+    --model_name_or_path liuhaotian/llava-v1.5-7b \
     --version v1 \
     --data_path ./playground/data/llava_v1_5_40000_mix.json \
     --image_folder ./playground/data \
     --vision_tower openai/clip-vit-large-patch14-336 \
-    --pretrain_mm_mlp_adapter outputs/pretrain_checkpoints/liuhaotian/llava-v1.5-7b/mm_projector.bin \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \
@@ -58,7 +57,7 @@ deepspeed --include=localhost:0,1,4,5 --master_port=29501 llava/train/train_mem.
     --shuffle_trivial_vision_tokens_keep_percentage $shuffle_trivial_vision_tokens_keep_percentage \
     --method_name $method_name \
     --run_name "${current_date}_lora_${lora_target_modules_str}_${method_name}_keep_${shuffle_trivial_vision_tokens_keep_percentage}_${max_train_samples}-vision_${vision_token_attn}-llava-v1.5-7b-lora" \
-    --output_dir "./outputs/lora_checkpoints/${lora_target_modules_str}/${current_date}_train_${max_train_samples}_mix/${method_name}_keep_${shuffle_trivial_vision_tokens_keep_percentage}_vision_${vision_token_attn}-llava-v1.5-7b-lora" \
+    --output_dir "./outputs_after_stage_2/lora_checkpoints/${lora_target_modules_str}/${current_date}_train_${max_train_samples}_mix/${method_name}_keep_${shuffle_trivial_vision_tokens_keep_percentage}_vision_${vision_token_attn}-llava-v1.5-7b-lora" \
 
 
 
@@ -70,4 +69,4 @@ deepspeed --include=localhost:0,1,4,5 --master_port=29501 llava/train/train_mem.
 #    --run_name "lora_${lora_target_modules_str}_${max_train_samples}-vis_tok_pos_enc_${vision_token_pos_enc}-vision_${vision_token_attn}-llava-v1.5-7b-lora" \
 #    --output_dir "./outputs/lora_checkpoints/${lora_target_modules_str}/train_${max_train_samples}_mix/vis_tok_pos_enc_${vision_token_pos_enc}-vision_${vision_token_attn}-llava-v1.5-7b-lora" \
 
-#bash scripts/my_scripts/finetune_dropout_attn_lora.sh
+#bash scripts/my_scripts/after_stage_2_finetune_dropout_attn_lora.sh

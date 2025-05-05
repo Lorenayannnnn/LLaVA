@@ -88,6 +88,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         all_image_token_indices: Optional[torch.LongTensor] = None,
         image_attentions: Optional[torch.FloatTensor] = None,
         is_image_token_mask: Optional[torch.Tensor] = None,
+        past_no_rope_image_key: Optional[List[torch.FloatTensor]] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if inputs_embeds is None:
             (
@@ -111,8 +112,11 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 images,
                 image_sizes,
                 all_image_token_indices,
+                # TODO test
                 self.shuffle_trivial_vision_tokens_keep_percentage if self.training else None,
                 self.method_name if self.training else None,
+                # self.shuffle_trivial_vision_tokens_keep_percentage,
+                # self.method_name,
                 image_attentions,
             )
 
@@ -131,12 +135,16 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             # modify
             all_image_token_indices=all_image_token_indices if self.vision_token_attn != "causal" or self.vision_token_pos_enc != "rope" or self.method_name is not None else None,
             is_image_token_mask=is_image_token_mask if self.vision_token_attn != "causal" or self.vision_token_pos_enc != "rope" or self.method_name is not None else None,
+            past_no_rope_image_key=past_no_rope_image_key if self.vision_token_pos_enc == "none_for_vis_key" else None
         )
 
         # Temporary fix for multi-gpu inference. Not sure why the returned image token indices is still None
         output_dict = dict(outputs)
         output_dict["all_image_token_indices"] = all_image_token_indices
         output_dict["image_attentions"] = image_attentions
+        output_dict["state"] = {
+            "past_no_rope_image_key": outputs.past_no_rope_image_key
+        }
         outputs = LlamaForCausalLMOutput(**output_dict)
 
         return outputs
@@ -192,13 +200,14 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             **kwargs
         )
 
-    def prepare_inputs_for_generation(self, input_ids, past_key_values=None,
-                                      inputs_embeds=None, all_image_token_indices=None, is_image_token_mask=None, **kwargs):
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, all_image_token_indices=None, is_image_token_mask=None, state=None, **kwargs):
         images = kwargs.pop("images", None)
         image_sizes = kwargs.pop("image_sizes", None)
         inputs = super().prepare_inputs_for_generation(
             input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs
         )
+        if state is not None and state["past_no_rope_image_key"] is not None:
+            inputs["past_no_rope_image_key"] = state["past_no_rope_image_key"]
         if images is not None:
             inputs['images'] = images
         if image_sizes is not None:
