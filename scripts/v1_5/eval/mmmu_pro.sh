@@ -41,20 +41,44 @@
 #MODEL_PATH=outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_txt_keep_0.9_vision_causal-llava-v1.5-7b-lora
 #MODEL_PATH=outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_all_keep_0.7_vision_causal-llava-v1.5-7b-lora
 #MODEL_PATH=outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_all_keep_0.5_vision_causal-llava-v1.5-7b-lora
-MODEL_PATH=outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/vis_tok_pos_enc_none_for_vis_key-vision_causal-llava-v1.5-7b-lora
-DEVICE=2
+#MODEL_PATH=outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/vis_tok_pos_enc_none_for_vis_key-vision_causal-llava-v1.5-7b-lora
+#MODEL_PATH=outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_all_keep_0.9_vision_causal-llava-v1.5-7b-lora
+#DEVICE=4
+#
+#echo "Evaluate ${MODEL_PATH}"
+#
+##--model-base lmsys/vicuna-7b-v1.5 \
+#CUDA_VISIBLE_DEVICES=${DEVICE} python -m llava.eval.model_mmmu_pro \
+#    --model-path $MODEL_PATH \
+#    --model-base liuhaotian/llava-v1.5-7b \
+#    --output_dir $MODEL_PATH/mmmu_pro \
+#    --single-pred-prompt \
+#    --temperature 0 \
+#    --conv-mode vicuna_v1 \
+#    --skip_multi_images \
 
+ALL_MODEL_PATHS=(
+"outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/vision_causal-llava-v1.5-7b-lora"
+"outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/vision_full-llava-v1.5-7b-lora"
+"outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_all_keep_0.5_vision_causal-llava-v1.5-7b-lora"
+"outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_all_keep_0.7_vision_causal-llava-v1.5-7b-lora"
+"outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_all_keep_0.9_vision_causal-llava-v1.5-7b-lora"
+"outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_txt_keep_0.7_vision_causal-llava-v1.5-7b-lora"
+"outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/dropout_by_nucleus_renormalize_each_head_each_token_for_txt_keep_0.9_vision_causal-llava-v1.5-7b-lora"
+"outputs_after_stage_2/lora_checkpoints/all/20250507_train_40000_mix/vis_tok_pos_enc_none_for_vis_key-vision_causal-llava-v1.5-7b-lora"
+)
 
-echo "Evaluate ${MODEL_PATH}"
+for MODEL_PATH in "${ALL_MODEL_PATHS[@]}"; do
+    echo "Evaluate ${MODEL_PATH}"
+    CUDA_VISIBLE_DEVICES=2 python -m llava.eval.model_mmmu_pro \
+        --model-path ${MODEL_PATH} \
+        --model-base liuhaotian/llava-v1.5-7b \
+        --output_dir ${MODEL_PATH}/w_dropout/mmmu_pro \
+        --single-pred-prompt \
+        --temperature 0 \
+        --conv-mode vicuna_v1 \
+        --skip_multi_images
+done
 
-#--model-base lmsys/vicuna-7b-v1.5 \
-CUDA_VISIBLE_DEVICES=${DEVICE} python -m llava.eval.model_mmmu_pro \
-    --model-path $MODEL_PATH \
-    --model-base liuhaotian/llava-v1.5-7b \
-    --output_dir $MODEL_PATH/mmmu_pro \
-    --single-pred-prompt \
-    --temperature 0 \
-    --conv-mode vicuna_v1 \
-    --skip_multi_images \
 
 #bash scripts/v1_5/eval/mmmu_pro.sh

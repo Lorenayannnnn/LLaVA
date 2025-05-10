@@ -310,12 +310,13 @@ def eval_model(args):
             image_tensor = process_images([image], image_processor, model.config)
 
             # TODO test
-            output = model.generate(input_ids, images=image_tensor.half().cuda(), max_new_tokens=100, return_dict_in_generate=True, do_sample=False, temperature=None, top_p=None)
-            decoded_output = tokenizer.batch_decode(output['sequences'], skip_special_tokens=True)[0].strip()
+            # output = model.generate(input_ids, images=image_tensor.half().cuda(), max_new_tokens=100, return_dict_in_generate=True, do_sample=False, temperature=None, top_p=None)
+            # output = model.generate(input_ids, images=image_tensor.half().cuda(), max_new_tokens=100, return_dict_in_generate=True, do_sample=False)
+            # decoded_output = tokenizer.batch_decode(output['sequences'], skip_special_tokens=True)[0].strip()
 
             # Analyze attention
             outputs_for_attn_analysis = model(input_ids, use_cache=True, images=image_tensor.half().cuda(), output_attentions=True)
-            # decoded_output = tokenizer.decode(torch.argmax(outputs_for_attn_analysis.logits[0][-1]))
+            decoded_output = tokenizer.decode(torch.argmax(outputs_for_attn_analysis.logits[0][-1]))
 
             if decoded_output.startswith(label):
                 correct = 1
@@ -335,8 +336,14 @@ def eval_model(args):
             # which is why we consider it's correct if option_chosen == 0
             batch_size = input_ids.size(0)
             assert batch_size == 1
-            last_token_attn_scores = outputs_for_attn_analysis.attentions[-1][0, :, -1, :]
-            avg_last_token_attn_scores = torch.mean(last_token_attn_scores, dim=0)
+
+            # last_token_attn_scores = outputs_for_attn_analysis.attentions[-1][0, :, -1, :]
+            # avg_last_token_attn_scores = torch.mean(last_token_attn_scores, dim=0)
+            # all_image_token_indices = outputs_for_attn_analysis.all_image_token_indices[0]
+            # last_token_to_all_image_token_attn_scores = avg_last_token_attn_scores[all_image_token_indices].cpu().tolist()
+            # CLS_tok_image_attentions = outputs_for_attn_analysis.image_attentions[0].cpu().tolist()
+            last_token_attn_scores = torch.concat([outputs_for_attn_analysis.attentions[layer_idx][0, :, -1, :].unsqueeze(0) for layer_idx in range(len(outputs_for_attn_analysis.attentions))])
+            avg_last_token_attn_scores = torch.sum(torch.sum(last_token_attn_scores, dim=0), dim=0)
             all_image_token_indices = outputs_for_attn_analysis.all_image_token_indices[0]
             last_token_to_all_image_token_attn_scores = avg_last_token_attn_scores[all_image_token_indices].cpu().tolist()
             CLS_tok_image_attentions = outputs_for_attn_analysis.image_attentions[0].cpu().tolist()

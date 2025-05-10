@@ -6,7 +6,7 @@ current_date="20250507"
 export WANDB_PROJECT=llava
 vision_token_attn="causal"
 max_train_samples=40000
-shuffle_trivial_vision_tokens_keep_percentage=0.5   # keep top 0.25
+shuffle_trivial_vision_tokens_keep_percentage=0.9   # keep top 0.25
 #method_name="dropout_by_each_head_each_token_for_txt"   # shuffle_by_CLS, shuffle_by_last_text, dropout_by_last_text_attn_for_txt, dropout_by_last_text_attn_for_all, dropout_by_each_head_each_token_for_txt, dropout_by_each_head_each_token_for_all, dropout_by_nucleus_each_head_each_token_for_all, dropout_by_nucleus_renormalize_each_head_each_token_for_all
 method_name="dropout_by_nucleus_renormalize_each_head_each_token_for_all"
 #method_name="dropout_by_nucleus_renormalize_each_head_each_token_for_txt"
@@ -16,7 +16,7 @@ lora_target_modules=("all")
 lora_target_modules_str=$(IFS=_; echo "${lora_target_modules[*]}")
 
 #deepspeed --include=localhost:1,2,3 --master_port=29501 llava/train/train_mem.py \
-deepspeed --master_port=29502 --include=localhost:1,2,3,6 llava/train/train_mem.py \
+deepspeed --master_port=29502 --include=localhost:1,2,3,4 llava/train/train_mem.py \
     --lora_enable True --lora_r 128 --lora_alpha 256 --lora_target_modules "${lora_target_modules[@]}" \
     --mm_projector_lr 2e-5 \
     --deepspeed ./scripts/zero3.json \
